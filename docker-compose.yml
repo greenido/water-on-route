@@ -1,0 +1,29 @@
+version: '3.8'
+services:
+  overpass:
+    image: wimmel/overpass:latest
+    container_name: overpass
+    environment:
+      - OVERPASS_MODE=init
+      - OVERPASS_PLANET_URL=https://download.geofabrik.de/north-america/us/california-latest.osm.pbf
+      - OVERPASS_DIFFS=yes
+      - OVERPASS_META=yes
+    volumes:
+      - overpass-db:/db
+    ports:
+      - "127.0.0.1:12345:80"
+    restart: unless-stopped
+  tiles:
+    image: maptiler/tileserver-gl:latest
+    container_name: tileserver
+    command: ["--raster","--port","8080"]
+    volumes:
+      - tiles-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+volumes:
+  overpass-db: {}
+  tiles-data: {}
+
+

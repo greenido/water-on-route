@@ -10,7 +10,8 @@ const downloadBtn = document.getElementById('downloadBtn');
 
 // Map setup
 const map = L.map('map', { zoomControl: true });
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const tileUrl = (window.WOR_CONFIG && window.WOR_CONFIG.tileUrl) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+L.tileLayer(tileUrl, {
   maxZoom: 19,
   attribution: '© OpenStreetMap contributors'
 }).addTo(map);
@@ -188,11 +189,12 @@ async function handleGpx(file) {
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
   try {
-    setStatus('Querying OpenStreetMap for water points …');
+    const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
+    setStatus(`Querying ${backend} for water points …`);
     let results = [];
     results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
-      setStatus(`Querying OpenStreetMap for water points … (${done})`);
-    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      setStatus(`Querying ${backend} for water points … (${done})`);
+    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
     foundWaterPoints = results;
     renderWaterMarkers(results);
     setStatus(`Found ${results.length} water points.`);

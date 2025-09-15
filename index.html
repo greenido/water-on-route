@@ -40,7 +40,13 @@
     </section>
   </main>
 
-  
+  <script>
+    // Configure local proxy for tiles and Overpass
+    window.WOR_CONFIG = {
+      overpassUrl: 'http://localhost:3000/api/overpass',
+      tileUrl: 'http://localhost:3000/tiles/{z}/{x}/{y}.png'
+    };
+  </script>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5/dist/togeojson.umd.js"></script>
