@@ -114,11 +114,127 @@ function fitMapToGeoJSON(geojson) {
   if (bounds.length) map.fitBounds(bounds);
 }
 
+// Geometry helpers for proximity filtering (200 m by default)
+const NEAR_DISTANCE_METERS = 200;
+const EARTH_RADIUS_M = 6378137;
+
+function lonLatToWebMercator(lon, lat) {
+  const x = EARTH_RADIUS_M * (lon * Math.PI / 180);
+  const y = EARTH_RADIUS_M * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+  return [x, y];
+}
+
+function pointToSegmentDistanceMeters(p, a, b) {
+  // p, a, b are [lon, lat]
+  const [px, py] = lonLatToWebMercator(p[0], p[1]);
+  const [ax, ay] = lonLatToWebMercator(a[0], a[1]);
+  const [bx, by] = lonLatToWebMercator(b[0], b[1]);
+  const abx = bx - ax;
+  const aby = by - ay;
+  const apx = px - ax;
+  const apy = py - ay;
+  const abLen2 = abx * abx + aby * aby || 1; // avoid div by 0
+  let t = (apx * abx + apy * aby) / abLen2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * abx;
+  const cy = ay + t * aby;
+  const dx = px - cx;
+  const dy = py - cy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function minDistancePointToLineStringMeters(pointLonLat, lineCoordsLonLat) {
+  let min = Infinity;
+  for (let i = 1; i < lineCoordsLonLat.length; i++) {
+    const d = pointToSegmentDistanceMeters(pointLonLat, lineCoordsLonLat[i - 1], lineCoordsLonLat[i]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+function extractRouteLineStrings(geojson) {
+  const lines = [];
+  function addLine(coords) { if (coords && coords.length >= 2) lines.push(coords); }
+  function walkGeometry(geom) {
+    if (!geom) return;
+    if (geom.type === 'LineString') addLine(geom.coordinates);
+    else if (geom.type === 'MultiLineString') {
+      for (const ls of geom.coordinates) addLine(ls);
+    } else if (geom.type === 'GeometryCollection') {
+      for (const g of geom.geometries || []) walkGeometry(g);
+    }
+  }
+  if (geojson.type === 'FeatureCollection') {
+    for (const f of geojson.features) walkGeometry(f.geometry);
+  } else if (geojson.type && geojson.coordinates) {
+    walkGeometry(geojson);
+  }
+  return lines;
+}
+
+function filterPointsNearRoute(geojsonRoute, points, maxMeters = NEAR_DISTANCE_METERS) {
+  const lineStrings = extractRouteLineStrings(geojsonRoute);
+  if (!lineStrings.length) return [];
+  const result = [];
+  for (const p of points) {
+    const lat = p.lat ?? p.center?.lat;
+    const lon = p.lon ?? p.center?.lon;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const pt = [lon, lat];
+    let min = Infinity;
+    for (const ls of lineStrings) {
+      const d = minDistancePointToLineStringMeters(pt, ls);
+      if (d < min) min = d;
+      if (min <= maxMeters) break;
+    }
+    if (min <= maxMeters) result.push(p);
+  }
+  return result;
+}
+
 function renderRoute(geojson) {
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   routeLayer = L.geoJSON(geojson, { style: { color: '#3aa7ff', weight: 4 } });
   routeLayer.addTo(map);
   fitMapToGeoJSON(geojson);
+}
+
+// Ensure GPX exporter is available (supports global UMD or dynamic load)
+let ensureToGpxPromise;
+function ensureToGpxAvailable() {
+  if (ensureToGpxPromise) return ensureToGpxPromise;
+  ensureToGpxPromise = new Promise(async (resolve, reject) => {
+    try {
+      if (typeof window !== 'undefined' && typeof window.togpx === 'function') {
+        return resolve(window.togpx);
+      }
+      // Try loading classic UMD script
+      await new Promise((res, rej) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/togpx@0.5.6/togpx.js';
+        s.async = true;
+        s.onload = () => res();
+        s.onerror = () => rej(new Error('Failed to load togpx UMD'));
+        document.head.appendChild(s);
+      });
+      if (typeof window !== 'undefined' && typeof window.togpx === 'function') {
+        return resolve(window.togpx);
+      }
+      // Fallback: dynamic ESM shim
+      try {
+        const mod = await import('https://esm.sh/togpx@0.5.6');
+        const fn = mod?.default || mod?.togpx;
+        if (typeof fn === 'function') {
+          if (typeof window !== 'undefined') window.togpx = fn;
+          return resolve(fn);
+        }
+      } catch (_) {}
+      reject(new Error('GPX exporter not loaded.'));
+    } catch (e) {
+      reject(e);
+    }
+  });
+  return ensureToGpxPromise;
 }
 
 function renderWaterMarkers(points) {
@@ -148,7 +264,9 @@ async function parseGpxFile(file) {
 }
 
 function combineToEnrichedGpx(geojsonRoute, waterPoints) {
-  const waypointFeatures = waterPoints
+  // Only include water points close to the route (<= 200 m)
+  const nearPoints = filterPointsNearRoute(geojsonRoute, waterPoints, NEAR_DISTANCE_METERS);
+  const waypointFeatures = nearPoints
     .filter(p => typeof (p.lat ?? p.center?.lat) === 'number' && typeof (p.lon ?? p.center?.lon) === 'number')
     .map(p => {
       const lat = p.lat ?? p.center.lat;
@@ -165,7 +283,11 @@ function combineToEnrichedGpx(geojsonRoute, waterPoints) {
     type: 'FeatureCollection',
     features: [...geojsonRoute.features, ...waypointFeatures]
   };
-  const gpxText = togpx(combined, { creator: 'GPX Water Mapper' });
+  const toGpxFn = (typeof window !== 'undefined' && window.togpx) || (typeof globalThis !== 'undefined' && globalThis.togpx);
+  if (typeof toGpxFn !== 'function') {
+    throw new Error('GPX exporter not loaded. Please ensure togpx is available.');
+  }
+  const gpxText = toGpxFn(combined, { creator: 'GPX Water Mapper' });
   return gpxText;
 }
 
@@ -222,9 +344,10 @@ dropZone.addEventListener('drop', (e) => {
   if (f) handleGpx(f).catch(err => setError(err.message || String(err)));
 });
 
-downloadBtn.addEventListener('click', () => {
+downloadBtn.addEventListener('click', async () => {
   try {
     if (!routeLayer) return;
+    await ensureToGpxAvailable();
     // Reconstruct route GeoJSON from displayed layer for robustness
     const routeGeo = routeLayer.toGeoJSON();
     const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
