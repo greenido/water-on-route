@@ -1,0 +1,47 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+#map { height: calc(100vh - 64px); width: 100%; }
+
+.water-marker {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  background: #0f1726;
+  border: 1px solid #294562;
+  color: #6ec8ff;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  font-size: 14px;
+}
+
+.loading {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  background: rgba(0,0,0,0.6);
+  z-index: 1000;
+  text-align: center;
+}
+.spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 4px solid #1f2937;
+  border-top-color: #38bdf8;
+  animation: spin 1s linear infinite;
+  margin: 0 auto;
+}
+@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+@media (max-width: 980px) {
+  #map { height: 60vh; }
+}
+
+#loading { display: none !important; }
+#loading.show { display: grid !important; }
+#loading[hidden] { display: none !important; }
+
+
