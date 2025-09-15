@@ -14,6 +14,16 @@ app.use(cors());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: '1mb' }));
 
+// serve favicon assets
+app.get('/favicon.svg', (req, res) => {
+  res.sendFile(path.join(__dirname, '../favicon.svg'));
+});
+// minimal ico fallback: reuse svg with correct content type if no .ico provided
+app.get('/favicon.ico', (req, res) => {
+  res.type('image/svg+xml');
+  res.sendFile(path.join(__dirname, '../favicon.svg'));
+});
+
 // Health
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
