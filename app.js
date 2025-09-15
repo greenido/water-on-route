@@ -5,6 +5,8 @@ const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
 let loadingEl = document.getElementById('loading');
 const downloadBtn = document.getElementById('downloadBtn');
+const radiusSelect = document.getElementById('radiusSelect');
+let selectedRadiusMeters = Number(radiusSelect?.value) || 150;
 
 // Remove failing overpass-frontend CDN import; rely on fetch fallback below
 
@@ -41,8 +43,9 @@ function centerMapOnUser() {
 centerMapOnUser();
 
 let routeLayer = null;
+let currentRouteGeoJSON = null;
 let waterLayer = L.layerGroup().addTo(map);
-const waterIcon = L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
+const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
 let originalGpxText = '';
 let foundWaterPoints = [];
 
@@ -114,8 +117,7 @@ function fitMapToGeoJSON(geojson) {
   if (bounds.length) map.fitBounds(bounds);
 }
 
-// Geometry helpers for proximity filtering (200 m by default)
-const NEAR_DISTANCE_METERS = 200;
+// Geometry helpers for proximity filtering
 const EARTH_RADIUS_M = 6378137;
 
 function lonLatToWebMercator(lon, lat) {
@@ -172,7 +174,7 @@ function extractRouteLineStrings(geojson) {
   return lines;
 }
 
-function filterPointsNearRoute(geojsonRoute, points, maxMeters = NEAR_DISTANCE_METERS) {
+function filterPointsNearRoute(geojsonRoute, points, maxMeters) {
   const lineStrings = extractRouteLineStrings(geojsonRoute);
   if (!lineStrings.length) return [];
   const result = [];
@@ -237,18 +239,29 @@ function ensureToGpxAvailable() {
   return ensureToGpxPromise;
 }
 
-function renderWaterMarkers(points) {
+function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
-  for (const p of points) {
+  points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.description) || 'Water';
     const type = p._type || p.tags?.amenity || p.tags?.natural || p.tags?.man_made || 'water';
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
-    if (typeof lat !== 'number' || typeof lon !== 'number') continue;
-    L.marker([lat, lon], { title: name, icon: waterIcon })
+    if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
       .bindPopup(`<b>${name}</b><br>Type: ${type}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
       .addTo(waterLayer);
-  }
+    if (animate) {
+      marker.on('add', () => {
+        requestAnimationFrame(() => {
+          const el = marker.getElement();
+          if (el) {
+            el.classList.add('drop-anim');
+            el.style.animationDelay = `${Math.min(idx * 15, 600)}ms`;
+          }
+        });
+      });
+    }
+  });
 }
 
 async function parseGpxFile(file) {
@@ -263,9 +276,9 @@ async function parseGpxFile(file) {
   return geojson;
 }
 
-function combineToEnrichedGpx(geojsonRoute, waterPoints) {
-  // Only include water points close to the route (<= 200 m)
-  const nearPoints = filterPointsNearRoute(geojsonRoute, waterPoints, NEAR_DISTANCE_METERS);
+function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters) {
+  // Only include water points close to the route per selected radius
+  const nearPoints = filterPointsNearRoute(geojsonRoute, waterPoints, radiusMeters);
   const waypointFeatures = nearPoints
     .filter(p => typeof (p.lat ?? p.center?.lat) === 'number' && typeof (p.lon ?? p.center?.lon) === 'number')
     .map(p => {
@@ -307,6 +320,7 @@ async function handleGpx(file) {
   setStatus(`Parsing ${file.name} …`);
   const geojson = await parseGpxFile(file);
   renderRoute(geojson);
+  currentRouteGeoJSON = geojson;
   setStatus('Computing bounding box …');
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
@@ -318,8 +332,9 @@ async function handleGpx(file) {
       setStatus(`Querying ${backend} for water points … (${done})`);
     }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
     foundWaterPoints = results;
-    renderWaterMarkers(results);
-    setStatus(`Found ${results.length} water points.`);
+    const near = filterPointsNearRoute(geojson, results, selectedRadiusMeters);
+    renderWaterMarkers(near, true);
+    setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
   } catch (e) {
     console.error(e);
@@ -351,7 +366,7 @@ downloadBtn.addEventListener('click', async () => {
     // Reconstruct route GeoJSON from displayed layer for robustness
     const routeGeo = routeLayer.toGeoJSON();
     const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
-    const gpx = combineToEnrichedGpx(routeFC, foundWaterPoints);
+    const gpx = combineToEnrichedGpx(routeFC, foundWaterPoints, selectedRadiusMeters);
     download('enriched.gpx', gpx);
   } catch (e) {
     setError(e.message || String(e));
@@ -363,5 +378,28 @@ setStatus('Load a GPX file to begin.');
 
 console.log('Ensuring loading overlay is hidden on initial load until a file is processed');
 showLoading(false);
+
+// React to radius changes: re-filter and animate markers
+if (radiusSelect) {
+  radiusSelect.addEventListener('change', () => {
+    const val = Number(radiusSelect.value);
+    selectedRadiusMeters = Number.isFinite(val) ? val : selectedRadiusMeters;
+    if (!routeLayer || !foundWaterPoints.length) return;
+    setStatus(`Updating results for ${selectedRadiusMeters} m …`);
+    showLoading(true);
+    try {
+      const routeGeo = routeLayer.toGeoJSON();
+      const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
+      const near = filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters);
+      renderWaterMarkers(near, true);
+      setStatus(`Found ${near.length} near-route water points (${foundWaterPoints.length} total).`);
+    } catch (e) {
+      console.error(e);
+      setError(e.message || String(e));
+    } finally {
+      showLoading(false);
+    }
+  });
+}
 
 
