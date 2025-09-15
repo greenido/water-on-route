@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>OSM API Tests</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; }
+      .pass { color: #16a34a; }
+      .fail { color: #dc2626; }
+      pre { background:#0f172a; color:#e5e7eb; padding:12px; border-radius:8px; overflow:auto; }
+    </style>
+  </head>
+  <body>
+    <h1>OSM API Tests</h1>
+    <div id="out"></div>
+    <script type="module">
+      import { fetchOSMWaterPointsAdaptive } from './osmApi.js';
+
+      const out = document.getElementById('out');
+      function log(status, name, message) {
+        const div = document.createElement('div');
+        div.className = status ? 'pass' : 'fail';
+        div.textContent = `${status ? 'PASS' : 'FAIL'}: ${name}${message ? ' - ' + message : ''}`;
+        out.appendChild(div);
+      }
+
+      async function testAdaptiveSplitOn400() {
+        let calls = 0;
+        const fakeFetch = async (url) => {
+          calls++;
+          // First call returns 400, subsequent calls succeed with minimal XML
+          if (calls === 1) {
+            return new Response('Bad bbox', { status: 400 });
+          }
+          const body = `<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">\n  <node id="1" lat="10" lon="10">\n    <tag k="amenity" v="drinking_water"/>\n  </node>\n</osm>`;
+          return new Response(body, { status: 200, headers: { 'Content-Type': 'text/xml' } });
+        };
+
+        const bbox = { minlat: 0, minlon: 0, maxlat: 1, maxlon: 1 };
+        const pts = await fetchOSMWaterPointsAdaptive(bbox, null, { fetchImpl: fakeFetch, minSpan: 0.1, initialBackoffMs: 0, maxBackoffMs: 0 });
+        if (Array.isArray(pts) && pts.length === 1 && pts[0].tags.amenity === 'drinking_water') {
+          log(true, 'adaptive split handles 400 and yields points');
+        } else {
+          log(false, 'adaptive split handles 400 and yields points', `got ${JSON.stringify(pts)}`);
+        }
+      }
+
+      async function testBackoff429() {
+        let calls = 0;
+        const times = [];
+        let lastTime = performance.now();
+        const fakeFetch = async (url) => {
+          const now = performance.now();
+          times.push(now - lastTime);
+          lastTime = now;
+          calls++;
+          if (calls < 3) {
+            return new Response('Too Many Requests', { status: 429 });
+          }
+          const body = `<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6"/>`;
+          return new Response(body, { status: 200, headers: { 'Content-Type': 'text/xml' } });
+        };
+
+        const bbox = { minlat: 0, minlon: 0, maxlat: 0.2, maxlon: 0.2 };
+        await fetchOSMWaterPointsAdaptive(bbox, null, { fetchImpl: fakeFetch, minSpan: 0.01, initialBackoffMs: 10, maxBackoffMs: 40 });
+        // We can't assert exact timing reliably, but we can assert at least multiple attempts were made
+        log(calls >= 3, 'exponential backoff triggers on 429');
+      }
+
+      async function run() {
+        try { await testAdaptiveSplitOn400(); } catch (e) { log(false, 'adaptive split handles 400', e.message); }
+        try { await testBackoff429(); } catch (e) { log(false, 'exponential backoff triggers on 429', e.message); }
+      }
+
+      run();
+    </script>
+  </body>
+  </html>
+
+

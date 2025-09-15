@@ -15,6 +15,30 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors'
 }).addTo(map);
 
+// Center on user's current location at startup
+function centerMapOnUser() {
+  try {
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude, longitude } = pos.coords;
+          map.setView([latitude, longitude], 13);
+        },
+        () => {
+          // fallback view
+          map.setView([20, 0], 2);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+      );
+    } else {
+      map.setView([20, 0], 2);
+    }
+  } catch (_) {
+    map.setView([20, 0], 2);
+  }
+}
+centerMapOnUser();
+
 let routeLayer = null;
 let waterLayer = L.layerGroup().addTo(map);
 const waterIcon = L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
@@ -152,133 +176,8 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-// Overpass helpers: mirrors, timeout, retry/backoff, tiling
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.nchc.org.tw/api/interpreter',
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
-];
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function fetchWithTimeout(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, { ...options, signal: controller.signal });
-    return resp;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function buildOverpassQuery(bbox) {
-  const bboxStr = `${bbox.minlat},${bbox.minlon},${bbox.maxlat},${bbox.maxlon}`;
-  return `
-    [out:json][timeout:60];
-    (
-      node["amenity"="drinking_water"](${bboxStr});
-      node["natural"="spring"](${bboxStr});
-      node["man_made"="water_tap"](${bboxStr});
-    );
-    out body center;`;
-}
-
-async function requestOverpass(query, endpoints = OVERPASS_ENDPOINTS, perEndpointRetries = 2, timeoutMs = 30000) {
-  let lastError = null;
-  for (const endpoint of endpoints) {
-    for (let attempt = 0; attempt <= perEndpointRetries; attempt++) {
-      try {
-        const resp = await fetchWithTimeout(endpoint, { method: 'POST', body: query }, timeoutMs);
-        if (!resp.ok) {
-          // Retry on 429, 502, 503, 504
-          if ([429, 502, 503, 504].includes(resp.status)) {
-            lastError = new Error(`Overpass error: ${resp.status}`);
-            const backoff = Math.min(1000 * Math.pow(2, attempt), 8000);
-            await sleep(backoff);
-            continue;
-          }
-          throw new Error(`Overpass error: ${resp.status}`);
-        }
-        return await resp.json();
-      } catch (err) {
-        lastError = err;
-        // AbortError or network: retry
-        const isAbort = err && (err.name === 'AbortError' || err.message?.includes('aborted'));
-        if (isAbort || err.message?.includes('NetworkError') || err.message?.includes('Failed to fetch')) {
-          const backoff = Math.min(1000 * Math.pow(2, attempt), 8000);
-          await sleep(backoff);
-          continue;
-        }
-        // other errors: try next endpoint
-        break;
-      }
-    }
-    // try next endpoint
-  }
-  throw lastError || new Error('Overpass request failed');
-}
-
-function splitBbox(bbox, maxSpan = 0.5) {
-  const latSpan = Math.max(0, bbox.maxlat - bbox.minlat);
-  const lonSpan = Math.max(0, bbox.maxlon - bbox.minlon);
-  const latTiles = Math.max(1, Math.ceil(latSpan / maxSpan));
-  const lonTiles = Math.max(1, Math.ceil(lonSpan / maxSpan));
-  const tiles = [];
-  for (let i = 0; i < latTiles; i++) {
-    const minlat = bbox.minlat + (latSpan * i) / latTiles;
-    const maxlat = bbox.minlat + (latSpan * (i + 1)) / latTiles;
-    for (let j = 0; j < lonTiles; j++) {
-      const minlon = bbox.minlon + (lonSpan * j) / lonTiles;
-      const maxlon = bbox.minlon + (lonSpan * (j + 1)) / lonTiles;
-      tiles.push({ minlat, minlon, maxlat, maxlon });
-    }
-  }
-  return tiles;
-}
-
-async function runWithConcurrency(items, limit, worker, onProgress) {
-  let index = 0;
-  let completed = 0;
-  const results = new Array(items.length);
-  async function next() {
-    const current = index++;
-    if (current >= items.length) return;
-    try {
-      results[current] = await worker(items[current], current);
-    } finally {
-      completed++;
-      if (onProgress) onProgress(completed, items.length);
-      await next();
-    }
-  }
-  const starters = [];
-  for (let k = 0; k < Math.min(limit, items.length); k++) starters.push(next());
-  await Promise.all(starters);
-  return results;
-}
-
-function normalizeNodes(data) {
-  const nodes = (data.elements || []).filter(e => e.type === 'node');
-  return nodes.map(n => ({ id: n.id, lat: n.lat, lon: n.lon, tags: n.tags, _type: 'node' }));
-}
-
-async function fetchOverpassWaterPoints(bbox, onProgress) {
-  const tiles = splitBbox(bbox, 0.5);
-  const all = await runWithConcurrency(tiles, 2, async (tile) => {
-    const query = buildOverpassQuery(tile);
-    const json = await requestOverpass(query);
-    return normalizeNodes(json);
-  }, onProgress);
-  const dedup = new Map();
-  for (const arr of all) {
-    for (const n of (arr || [])) {
-      if (!dedup.has(n.id)) dedup.set(n.id, n);
-    }
-  }
-  return Array.from(dedup.values());
-}
+// Import adaptive OSM utilities
+import { fetchOSMWaterPointsAdaptive } from './osmApi.js';
 
 async function handleGpx(file) {
   setError('');
@@ -289,34 +188,11 @@ async function handleGpx(file) {
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
   try {
-    setStatus('Querying OpenStreetMap (Overpass) for water points …');
-    // Prefer robust fetch with mirrors/tiling; fall back to OverpassFrontend if present and fetch fails
+    setStatus('Querying OpenStreetMap for water points …');
     let results = [];
-    try {
-      results = await fetchOverpassWaterPoints(bbox, (done, total) => {
-        setStatus(`Querying Overpass for water points … (${done}/${total})`);
-      });
-    } catch (primaryErr) {
-      if (window.OverpassFrontend) {
-        try {
-          results = await new Promise((resolve, reject) => {
-            const of = new window.OverpassFrontend('//overpass-api.de/api/interpreter');
-            const acc = [];
-            const q = 'node["amenity"="drinking_water"];node["natural"="spring"];node["man_made"="water_tap"];';
-            of.BBoxQuery(q, bbox, { properties: window.OverpassFrontend.ALL }, (err, ob) => {
-              if (err) { reject(err); return; }
-              acc.push({ id: ob.id, lat: ob.lat, lon: ob.lon, center: ob.center, tags: ob.tags, _type: ob.type });
-            }, (err) => {
-              if (err) reject(err); else resolve(acc);
-            });
-          });
-        } catch (fallbackErr) {
-          throw primaryErr;
-        }
-      } else {
-        throw primaryErr;
-      }
-    }
+    results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
+      setStatus(`Querying OpenStreetMap for water points … (${done})`);
+    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
     renderWaterMarkers(results);
     setStatus(`Found ${results.length} water points.`);
