@@ -1,3 +1,25 @@
+/**
+ * Water on Route — Local Dev Server
+ * Purpose: Serve static client files and proxy Overpass + OSM tiles for local development.
+ *
+ * Endpoints:
+ *   GET  /                   → index.html
+ *   GET  /app.js             → client script
+ *   GET  /styles.css         → styles
+ *   GET  /favicon.svg        → favicon (also as .ico)
+ *   GET  /health             → health check
+ *   POST /api/overpass       → Overpass passthrough (form-urlencoded or JSON { query })
+ *   GET  /tiles/:z/:x/:y.png → Tile proxy to configured OSM tile server
+ *
+ * Environment variables:
+ *   PORT                    → listening port (default 3000)
+ *   OVERPASS_URL            → Overpass API base URL
+ *   OVERPASS_TIMEOUT_MS     → timeout for Overpass requests
+ *   TILE_URL_TEMPLATE       → tile URL template, e.g. https://tile.openstreetmap.org/{z}/{x}/{y}.png
+ *   TILE_TIMEOUT_MS         → timeout for tile fetches
+ *   TILE_USER_AGENT         → UA string for tile requests
+ */
+
 const express = require('express');
 const cors = require('cors');
 const { fetch } = require('undici');

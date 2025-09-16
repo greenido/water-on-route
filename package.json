@@ -1,6 +1,27 @@
 {
   "name": "water-on-route-local-server",
   "version": "1.0.0",
+  "description": "Water on Route Local Server",
+  "author": "Ido Green",
+  "license": "MIT",
+  "homepage": "https://github.com/greenido/water-on-route",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/greenido/water-on-route.git"
+  },
+  "bugs": {
+    "url": "https://github.com/greenido/water-on-route/issues"
+  },
+  "keywords": [
+    "water",
+    "route",
+    "gpx",
+    "overpass",
+    "osm"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "private": true,
   "type": "commonjs",
   "scripts": {

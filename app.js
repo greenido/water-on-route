@@ -1,3 +1,22 @@
+/**
+ * Water on Route — Client App
+ * Purpose: Leaflet-based GPX viewer that finds near-route water points via Overpass
+ *          and exports an enriched GPX with waypoints.
+ *
+ * Dependencies provided by HTML (globals):
+ *   - Leaflet (L)
+ *   - toGeoJSON
+ *   - togpx (loaded on demand if not present)
+ *
+ * ESM imports:
+ *   - fetchOSMWaterPointsAdaptive from ./osmApi.js
+ *
+ * UX features:
+ *   - Drag & drop or file picker for GPX
+ *   - Base layer switcher and animated water markers
+ *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download
+ */
+
 // Basic UI elements
 const fileInput = document.getElementById('gpxFile');
 const dropZone = document.getElementById('dropZone');
