@@ -368,7 +368,7 @@ function renderWaterMarkers(points, animate = false) {
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
     const typeDisplay = p._type === 'node' ? 'node 🚰' : type;
     const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
-      .bindPopup(`<b>${name}</b><br>Type: ${typeDisplay}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+      .bindPopup(`<b>${name}</b><br>Type: ${typeDisplay}<br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`)
       .addTo(waterLayer);
     if (animate) {
       marker.on('add', () => {
