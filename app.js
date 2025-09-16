@@ -169,6 +169,33 @@ function setError(msg) {
   if (!msg) { errorEl.hidden = true; errorEl.textContent = ''; return; }
   errorEl.hidden = false; errorEl.textContent = msg;
 }
+let toastEl = null;
+let toastTimer = null;
+function showToast(message, durationMs = 2000) {
+  try {
+    if (!toastEl) {
+      const div = document.createElement('div');
+      div.id = 'toast';
+      div.className = 'rounded-lg border bg-slate-800 border-slate-700 text-slate-100 shadow-lg px-3 py-2 text-sm';
+      div.style.position = 'fixed';
+      div.style.left = '50%';
+      div.style.transform = 'translateX(-50%)';
+      div.style.bottom = '20px';
+      div.style.opacity = '0';
+      div.style.pointerEvents = 'none';
+      div.style.transition = 'opacity 150ms ease';
+      div.style.zIndex = '3000';
+      document.body.appendChild(div);
+      toastEl = div;
+    }
+    toastEl.textContent = message;
+    toastEl.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      if (toastEl) toastEl.style.opacity = '0';
+    }, Number.isFinite(durationMs) ? durationMs : 2000);
+  } catch (_) {}
+}
 function ensureLoadingEl() {
   if (!loadingEl) {
     const div = document.createElement('div');
@@ -406,6 +433,8 @@ function resetApp() {
     setStatus('Load a GPX file to begin.');
     // Re-center view
     centerMapOnUser();
+    // Notify user
+    showToast('Map cleaned.');
   } catch (_) {}
 }
 
