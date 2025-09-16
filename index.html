@@ -100,10 +100,10 @@
   </div>
 
   <script>
-    // Configure local proxy for tiles and Overpass
+    // Configure same-origin proxy for tiles and Overpass (works locally and in production)
     window.WOR_CONFIG = {
-      overpassUrl: 'http://localhost:3000/api/overpass',
-      tileUrl: 'http://localhost:3000/tiles/{z}/{x}/{y}.png'
+      overpassUrl: '/api/overpass',
+      tileUrl: '/tiles/{z}/{x}/{y}.png'
     };
   </script>
 
