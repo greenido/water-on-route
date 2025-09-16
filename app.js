@@ -33,33 +33,76 @@ const baseTileOptions = {
   // Ensure CORS works with the proxy and CDN
   crossOrigin: true
 };
-const tileLayer = L.tileLayer(tileUrl, baseTileOptions).addTo(map);
 
-// Retry failed tiles with light backoff and cache-busting
-tileLayer.on('tileerror', (e) => {
-  const img = e.tile;
-  if (!img) return;
-  const tries = Number(img.getAttribute('data-retry') || '0');
-  if (tries >= 3) return;
-  const src = img.getAttribute('src') || '';
-  try {
-    const url = new URL(src, window.location.href);
-    url.searchParams.set('retry', String(tries + 1));
-    url.searchParams.set('_t', String(Date.now()));
-    img.setAttribute('data-retry', String(tries + 1));
-    const delay = (tries + 1) * 400;
-    setTimeout(() => { img.src = url.toString(); }, delay);
-  } catch (_) {
-    const sep = src.includes('?') ? '&' : '?';
-    const next = src + sep + 'retry=' + (tries + 1) + '&_t=' + Date.now();
-    img.setAttribute('data-retry', String(tries + 1));
-    const delay = (tries + 1) * 400;
-    setTimeout(() => { img.src = next; }, delay);
-  }
+// Define popular base layers
+const osmStandard = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  ...baseTileOptions,
+  attribution: '© OpenStreetMap contributors'
 });
-tileLayer.on('tileload', (e) => {
-  if (e && e.tile) e.tile.removeAttribute('data-retry');
+const openTopo = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+  ...baseTileOptions,
+  maxNativeZoom: 17,
+  attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)'
 });
+const esriWorldImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  ...baseTileOptions,
+  maxNativeZoom: 19,
+  attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+});
+const localTiles = (window.WOR_CONFIG && window.WOR_CONFIG.tileUrl)
+  ? L.tileLayer(window.WOR_CONFIG.tileUrl, {
+      ...baseTileOptions,
+      attribution: 'Local tiles | © OpenStreetMap contributors'
+    })
+  : null;
+
+const baseLayers = {
+  'OSM Standard': osmStandard,
+  'OpenTopoMap (Terrain)': openTopo,
+  'Esri WorldImagery (Satellite)': esriWorldImagery,
+  ...(localTiles ? { 'Local Tiles': localTiles } : {})
+};
+
+let tileLayer = localTiles || osmStandard;
+tileLayer.addTo(map);
+
+// Helper to attach robust retry handlers to any base layer
+function attachTileRetryHandlers(layer) {
+  if (!layer) return;
+  layer.on('tileerror', (e) => {
+    const img = e.tile;
+    if (!img) return;
+    const tries = Number(img.getAttribute('data-retry') || '0');
+    if (tries >= 3) return;
+    const src = img.getAttribute('src') || '';
+    try {
+      const url = new URL(src, window.location.href);
+      url.searchParams.set('retry', String(tries + 1));
+      url.searchParams.set('_t', String(Date.now()));
+      img.setAttribute('data-retry', String(tries + 1));
+      const delay = (tries + 1) * 400;
+      setTimeout(() => { img.src = url.toString(); }, delay);
+    } catch (_) {
+      const sep = src.includes('?') ? '&' : '?';
+      const next = src + sep + 'retry=' + (tries + 1) + '&_t=' + Date.now();
+      img.setAttribute('data-retry', String(tries + 1));
+      const delay = (tries + 1) * 400;
+      setTimeout(() => { img.src = next; }, delay);
+    }
+  });
+  layer.on('tileload', (e) => {
+    if (e && e.tile) e.tile.removeAttribute('data-retry');
+  });
+}
+
+// Attach retry handlers to all defined base layers
+attachTileRetryHandlers(osmStandard);
+attachTileRetryHandlers(openTopo);
+attachTileRetryHandlers(esriWorldImagery);
+attachTileRetryHandlers(localTiles);
+
+// Keep reference to current base layer when user switches
+map.on('baselayerchange', (e) => { tileLayer = e.layer; });
 
 // Force a redraw after zoom completes to ensure any missed tiles are requested
 map.on('zoomend', () => {
@@ -96,6 +139,10 @@ let waterLayer = L.layerGroup().addTo(map);
 const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
 let originalGpxText = '';
 let foundWaterPoints = [];
+let layersControl = null;
+
+// Layers control: allow switching base maps and toggling overlays
+layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer }, { collapsed: true }).addTo(map);
 
 // Helpers
 function setStatus(msg) { statusEl.textContent = msg || ''; }
@@ -243,9 +290,14 @@ function filterPointsNearRoute(geojsonRoute, points, maxMeters) {
 }
 
 function renderRoute(geojson) {
-  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (routeLayer) {
+    try { if (layersControl) layersControl.removeLayer(routeLayer); } catch (_) {}
+    map.removeLayer(routeLayer);
+    routeLayer = null;
+  }
   routeLayer = L.geoJSON(geojson, { style: { color: '#3aa7ff', weight: 4 } });
   routeLayer.addTo(map);
+  try { if (layersControl) layersControl.addOverlay(routeLayer, 'Route'); } catch (_) {}
   fitMapToGeoJSON(geojson);
 }
 
@@ -318,7 +370,11 @@ function resetApp() {
   try {
     setError('');
     // Remove layers
-    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    if (routeLayer) {
+      try { if (layersControl) layersControl.removeLayer(routeLayer); } catch (_) {}
+      map.removeLayer(routeLayer);
+      routeLayer = null;
+    }
     if (waterLayer) { waterLayer.clearLayers(); }
     // Reset state
     currentRouteGeoJSON = null;

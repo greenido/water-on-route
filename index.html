@@ -12,7 +12,7 @@
 </head>
 <body class="bg-slate-950 text-slate-100">
   <header class="px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between">
-    <h1 class="m-0 text-lg tracking-wide font-semibold">GPX Water Mapper</h1>
+    <h1 class="m-0 text-lg tracking-wide font-semibold">💧GPX Water Mapper</h1>
     <nav class="flex items-center gap-2">
       <button id="navNewBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">New</button>
       <button id="navHelpBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">Help</button>
@@ -24,7 +24,7 @@
       <div class="space-y-3">
         <label for="gpxFile" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 cursor-pointer transition">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M12 16a1 1 0 0 1-1-1V7.41L8.7 9.7a1 1 0 1 1-1.4-1.4l4-4a1 1 0 0 1 1.4 0l4 4a1 1 0 1 1-1.4 1.4L13 7.41V15a1 1 0 0 1-1 1Z"/><path d="M5 15a1 1 0 0 1 1 1v2h12v-2a1 1 0 1 1 2 0v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 2 0v2h2v-2a1 1 0 0 1 1-1Z"/></svg>
-          <span>Select GPX</span>
+          <span>Select GPX Route</span>
         </label>
         <input type="file" id="gpxFile" accept=".gpx" hidden>
         <div id="dropZone" class="rounded-xl border-2 border-dashed border-slate-700 text-slate-400 p-4 text-center hover:border-slate-500 transition">Drop GPX file here</div>
@@ -39,6 +39,8 @@
           <option value="200">200 m</option>
           <option value="300">300 m</option>
           <option value="500">500 m</option>
+          <option value="1000">1000 m</option>
+          <option value="2000">2000 m</option>
         </select>
       </div>
 
