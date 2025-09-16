@@ -75,7 +75,21 @@
           <li>Click "Download enriched GPX" to save your original route with water waypoints added.</li>
           <li>Use "New" anytime to clear the map and start over.</li>
         </ol>
-        <p class="text-slate-400">Data is fetched from Overpass (proxied locally when available) or directly from OSM. Results depend on OSM coverage.</p>
+        <div class="pt-2">
+          <h3 class="text-slate-200 font-medium mb-2">Keyboard shortcuts</h3>
+          <ul class="grid sm:grid-cols-2 gap-y-1 gap-x-4">
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">?</kbd><span>Open Help</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">L</kbd><span>Select GPX (open file)</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">N</kbd><span>New (reset)</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">D</kbd><span>Download enriched GPX</span></li>
+          </ul>
+        </div>
+
+        <p class="text-slate-400">ℹ️ Data is fetched from Overpass (proxied locally when available) or directly from OSM. Results depend on OSM coverage.</p>
+        <p class="text-slate-400">
+          💧 Call <a href="https://x.com/greenido" target="_blank" rel="noopener" class="underline text-sky-400 hover:text-sky-300">Ido</a>
+           if you need more help (or water or a 🍺)
+        </p>
       </div>
       <div class="p-4 border-t border-slate-800 text-right">
         <button id="helpOkBtn" class="px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium hover:bg-sky-300 transition text-sm">Got it</button>

@@ -552,6 +552,14 @@ document.addEventListener('keydown', (e) => {
     if (fileInput) fileInput.click();
     return;
   }
+  // 'D' downloads enriched GPX
+  if (!isTyping && (e.key === 'D' || e.key === 'd')) {
+    if (downloadBtn && !downloadBtn.disabled) {
+      e.preventDefault();
+      downloadBtn.click();
+      return;
+    }
+  }
 
   // Modal-only keys
   const modalOpen = helpModal && !helpModal.classList.contains('hidden');
