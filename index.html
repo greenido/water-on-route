@@ -11,8 +11,12 @@
   <link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body class="bg-slate-950 text-slate-100">
-  <header class="px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950">
+  <header class="px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between">
     <h1 class="m-0 text-lg tracking-wide font-semibold">GPX Water Mapper</h1>
+    <nav class="flex items-center gap-2">
+      <button id="navNewBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">New</button>
+      <button id="navHelpBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">Help</button>
+    </nav>
   </header>
 
   <main class="grid md:grid-cols-[360px_1fr] min-h-[calc(100vh-64px)]">
@@ -53,6 +57,31 @@
       <div id="map" class="h-full"></div>
     </section>
   </main>
+
+  <!-- Help modal -->
+  <div id="helpModal" class="fixed inset-0 z-[2000] hidden" aria-hidden="true" role="dialog" aria-modal="true">
+    <div id="helpOverlay" class="absolute inset-0 bg-black/60 opacity-0 transition-opacity duration-200"></div>
+    <div id="helpPanel" class="relative mx-auto my-10 max-w-2xl bg-slate-900 border border-slate-700 rounded-xl shadow-xl opacity-0 translate-y-4 scale-95 transition-all duration-200 max-h-[80vh] overflow-auto" tabindex="-1">
+      <div class="flex items-center justify-between p-4 border-b border-slate-800">
+        <h2 class="text-base font-semibold">About GPX Water Mapper</h2>
+        <button id="helpCloseBtn" class="p-2 rounded-md hover:bg-slate-800" aria-label="Close help">✕</button>
+      </div>
+      <div class="p-4 space-y-3 text-sm text-slate-300">
+        <p>This app helps you enrich a GPX route with nearby water points from OpenStreetMap.</p>
+        <ol class="list-decimal pl-5 space-y-1">
+          <li>Load your route: click "Select GPX" or drag-and-drop a .gpx file.</li>
+          <li>Choose a search radius. Only water points within this distance of your route are included.</li>
+          <li>The map shows found water sources. Hover/tap markers for details.</li>
+          <li>Click "Download enriched GPX" to save your original route with water waypoints added.</li>
+          <li>Use "New" anytime to clear the map and start over.</li>
+        </ol>
+        <p class="text-slate-400">Data is fetched from Overpass (proxied locally when available) or directly from OSM. Results depend on OSM coverage.</p>
+      </div>
+      <div class="p-4 border-t border-slate-800 text-right">
+        <button id="helpOkBtn" class="px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium hover:bg-sky-300 transition text-sm">Got it</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     // Configure local proxy for tiles and Overpass

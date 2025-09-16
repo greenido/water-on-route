@@ -7,16 +7,64 @@ let loadingEl = document.getElementById('loading');
 const downloadBtn = document.getElementById('downloadBtn');
 const radiusSelect = document.getElementById('radiusSelect');
 let selectedRadiusMeters = Number(radiusSelect?.value) || 150;
+// Top nav + help modal elements
+const navNewBtn = document.getElementById('navNewBtn');
+const navHelpBtn = document.getElementById('navHelpBtn');
+const helpModal = document.getElementById('helpModal');
+const helpOverlay = document.getElementById('helpOverlay');
+const helpPanel = document.getElementById('helpPanel');
+const helpCloseBtn = document.getElementById('helpCloseBtn');
+const helpOkBtn = document.getElementById('helpOkBtn');
 
 // Remove failing overpass-frontend CDN import; rely on fetch fallback below
 
 // Map setup
-const map = L.map('map', { zoomControl: true });
+const map = L.map('map', { zoomControl: true, zoomAnimation: true });
 const tileUrl = (window.WOR_CONFIG && window.WOR_CONFIG.tileUrl) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-L.tileLayer(tileUrl, {
-  maxZoom: 19,
-  attribution: '© OpenStreetMap contributors'
-}).addTo(map);
+const baseTileOptions = {
+  // Allow overscaling beyond native zoom to avoid gaps when zooming in
+  maxZoom: 22,
+  maxNativeZoom: 19,
+  attribution: '© OpenStreetMap contributors',
+  // Keep nearby tiles around to reduce holes during fast pan/zoom
+  keepBuffer: 6,
+  // Request tiles when the map is idle to avoid flooding during animation
+  updateWhenIdle: true,
+  // Ensure CORS works with the proxy and CDN
+  crossOrigin: true
+};
+const tileLayer = L.tileLayer(tileUrl, baseTileOptions).addTo(map);
+
+// Retry failed tiles with light backoff and cache-busting
+tileLayer.on('tileerror', (e) => {
+  const img = e.tile;
+  if (!img) return;
+  const tries = Number(img.getAttribute('data-retry') || '0');
+  if (tries >= 3) return;
+  const src = img.getAttribute('src') || '';
+  try {
+    const url = new URL(src, window.location.href);
+    url.searchParams.set('retry', String(tries + 1));
+    url.searchParams.set('_t', String(Date.now()));
+    img.setAttribute('data-retry', String(tries + 1));
+    const delay = (tries + 1) * 400;
+    setTimeout(() => { img.src = url.toString(); }, delay);
+  } catch (_) {
+    const sep = src.includes('?') ? '&' : '?';
+    const next = src + sep + 'retry=' + (tries + 1) + '&_t=' + Date.now();
+    img.setAttribute('data-retry', String(tries + 1));
+    const delay = (tries + 1) * 400;
+    setTimeout(() => { img.src = next; }, delay);
+  }
+});
+tileLayer.on('tileload', (e) => {
+  if (e && e.tile) e.tile.removeAttribute('data-retry');
+});
+
+// Force a redraw after zoom completes to ensure any missed tiles are requested
+map.on('zoomend', () => {
+  try { tileLayer.redraw(); } catch (_) {}
+});
 
 // Center on user's current location at startup
 function centerMapOnUser() {
@@ -247,8 +295,9 @@ function renderWaterMarkers(points, animate = false) {
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    const typeDisplay = p._type === 'node' ? 'node 🚰' : type;
     const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
-      .bindPopup(`<b>${name}</b><br>Type: ${type}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
+      .bindPopup(`<b>${name}</b><br>Type: ${typeDisplay}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`)
       .addTo(waterLayer);
     if (animate) {
       marker.on('add', () => {
@@ -262,6 +311,61 @@ function renderWaterMarkers(points, animate = false) {
       });
     }
   });
+}
+
+// Reset app state and UI
+function resetApp() {
+  try {
+    setError('');
+    // Remove layers
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    if (waterLayer) { waterLayer.clearLayers(); }
+    // Reset state
+    currentRouteGeoJSON = null;
+    originalGpxText = '';
+    foundWaterPoints = [];
+    downloadBtn.disabled = true;
+    // Clear inputs and status
+    if (fileInput) fileInput.value = '';
+    if (dropZone && dropZone.classList) dropZone.classList.remove('dragover');
+    setStatus('Load a GPX file to begin.');
+    // Re-center view
+    centerMapOnUser();
+  } catch (_) {}
+}
+
+// Help modal controls
+function showHelpModal(show) {
+  if (!helpModal) return;
+  const isShow = !!show;
+  const focusableSelectors = 'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+  const focusTrap = () => {
+    if (!isShow) return;
+    const focusables = helpModal.querySelectorAll(focusableSelectors);
+    if (focusables.length) {
+      const first = helpPanel || focusables[0];
+      if (first && typeof first.focus === 'function') first.focus();
+    }
+  };
+  if (isShow) {
+    helpModal.classList.remove('hidden');
+    helpModal.setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';
+    if (helpOverlay) helpOverlay.classList.add('opacity-100');
+    if (helpPanel) {
+      helpPanel.classList.remove('opacity-0', 'translate-y-4', 'scale-95');
+    }
+    setTimeout(focusTrap, 0);
+  } else {
+    helpModal.setAttribute('aria-hidden', 'true');
+    document.body.style.overflow = '';
+    if (helpOverlay) helpOverlay.classList.remove('opacity-100');
+    if (helpPanel) {
+      helpPanel.classList.add('opacity-0', 'translate-y-4', 'scale-95');
+    }
+    // Wait for fade before hiding
+    setTimeout(() => { helpModal.classList.add('hidden'); }, 180);
+  }
 }
 
 async function parseGpxFile(file) {
@@ -401,5 +505,77 @@ if (radiusSelect) {
     }
   });
 }
+
+// Wire top nav and help modal events
+if (navNewBtn) {
+  navNewBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    resetApp();
+  });
+}
+
+function bindHideHelp() {
+  showHelpModal(false);
+}
+
+if (navHelpBtn) {
+  navHelpBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    showHelpModal(true);
+  });
+}
+if (helpOverlay) helpOverlay.addEventListener('click', bindHideHelp);
+if (helpCloseBtn) helpCloseBtn.addEventListener('click', bindHideHelp);
+if (helpOkBtn) helpOkBtn.addEventListener('click', bindHideHelp);
+
+// ESC to close, trap focus within the modal
+document.addEventListener('keydown', (e) => {
+  // Global shortcuts (only when not typing in input fields)
+  const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+  const isTyping = tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target && e.target.isContentEditable);
+
+  // '?' opens Help (Shift+/ is '?')
+  if (!isTyping && (e.key === '?' || (e.key === '/' && e.shiftKey))) {
+    e.preventDefault();
+    showHelpModal(true);
+    return;
+  }
+  // 'N' opens New (reset)
+  if (!isTyping && (e.key === 'N' || e.key === 'n')) {
+    e.preventDefault();
+    resetApp();
+    return;
+  }
+  // 'L' opens file chooser
+  if (!isTyping && (e.key === 'L' || e.key === 'l')) {
+    e.preventDefault();
+    if (fileInput) fileInput.click();
+    return;
+  }
+
+  // Modal-only keys
+  const modalOpen = helpModal && !helpModal.classList.contains('hidden');
+  if (!modalOpen) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    showHelpModal(false);
+    return;
+  }
+  if (e.key === 'Tab') {
+    const focusableSelectors = 'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+    const focusables = helpModal.querySelectorAll(focusableSelectors);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+});
 
 
