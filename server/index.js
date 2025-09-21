@@ -107,15 +107,26 @@ function requireBasicAuth(req, res, next) {
 app.post('/api/routes', async (req, res) => {
   try {
     const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = req.body || {};
+    console.log('[POST /api/routes] Incoming request', {
+      filename,
+      bbox,
+      routeKm,
+      waypointsCount,
+      hasWaterPoints: !!waterPoints,
+      hasEnrichedGpx: !!enrichedGpxText
+    });
     if (typeof gpxText !== 'string' || gpxText.length === 0) {
+      console.warn('[POST /api/routes] Missing gpxText');
       return res.status(400).json({ error: 'gpxText is required' });
     }
     const fileSize = Buffer.byteLength(gpxText, 'utf8');
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || null;
+    console.log('[POST /api/routes] Calculated fileSize and clientIp', { fileSize, clientIp });
     const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
+    console.log('[POST /api/routes] Route inserted', { id: result.id });
     return res.json({ ok: true, id: result.id });
   } catch (e) {
-    console.error(e);
+    console.error('[POST /api/routes] Error:', e);
     return res.status(500).json({ error: e.message || 'Failed to save route' });
   }
 });

@@ -385,7 +385,7 @@ function ensureToGpxAvailable() {
   return ensureToGpxPromise;
 }
 
-function renderWaterMarkers(points, animate = false) {
+async function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
   points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.description) || 'Water';
@@ -409,6 +409,52 @@ function renderWaterMarkers(points, animate = false) {
       });
     }
   });
+
+  // --- Save the route in the DB via /api/routes ---
+  try {
+    // Only attempt if we have a route and water points
+    if (typeof currentRouteGeoJSON !== 'undefined' && currentRouteGeoJSON && Array.isArray(points) && points.length > 0) {
+      // Compute bbox and route length if possible
+      const bbox = computeBBoxFromGeoJSON ? computeBBoxFromGeoJSON(currentRouteGeoJSON) : null;
+      const routeKm = (window.computeRouteLengthKm && typeof window.computeRouteLengthKm === 'function')
+        ? window.computeRouteLengthKm(currentRouteGeoJSON)
+        : null;
+      // Try to get the original GPX text if available
+      const gpxText = typeof originalGpxText !== 'undefined' ? originalGpxText : null;
+      // Compose filename if possible
+      const filename = (typeof fileInput !== 'undefined' && fileInput && fileInput.files && fileInput.files[0])
+        ? fileInput.files[0].name
+        : 'route.gpx';
+      // Build enriched GPX and include water points
+      await ensureToGpxAvailable();
+      const routeGeo = (routeLayer && typeof routeLayer.toGeoJSON === 'function') ? routeLayer.toGeoJSON() : currentRouteGeoJSON;
+      const routeFC = routeGeo && routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
+      const enrichedGpxText = combineToEnrichedGpx(routeFC, points, selectedRadiusMeters);
+      // Compose payload
+      const payload = {
+        filename,
+        gpxText,
+        bbox,
+        routeKm,
+        waypointsCount: points.length,
+        waterPoints: points,
+        enrichedGpxText
+      };
+      // POST to /api/routes
+      await fetch('/api/routes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      // Optionally: could handle response or errors here
+    }
+    else {
+      console.warn('[renderWaterMarkers] No route or water points to save');
+    }
+  } catch (err) {
+    // Optionally: log or ignore errors
+    console.warn('[renderWaterMarkers] Failed to save route to /api/routes', err);
+  }
 }
 
 // Reset app state and UI
