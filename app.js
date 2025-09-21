@@ -584,7 +584,7 @@ downloadBtn.addEventListener('click', async () => {
 setStatus('Load a GPX file to begin.');
 // Ensure loading overlay is hidden on initial load until a file is processed
 
-console.log('Ensuring loading overlay is hidden on initial load until a file is processed');
+console.log('-- Ensuring loading overlay is hidden on initial load until a file is processed');
 showLoading(false);
 
 // React to radius changes: re-filter and animate markers
