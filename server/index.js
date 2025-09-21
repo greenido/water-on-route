@@ -233,14 +233,6 @@ app.get('/admin', requireBasicAuth, (req, res) => {
               '<td>' + (r.uploadedAt || '') + '</td>' +
               '<td>' + (r.clientIp || '') + '</td>' +
               '<td>' + dlOriginal + dlEnriched + '</td>';
-            // Row click: open enriched if available, otherwise original
-            tr.style.cursor = 'pointer';
-            tr.addEventListener('click', (e) => {
-              const tag = (e.target && e.target.tagName || '').toLowerCase();
-              if (tag === 'a' || tag === 'button') return; // let link clicks work
-              const url = r.hasEnriched ? ('/api/routes/' + r.id + '/enriched.gpx') : ('/api/routes/' + r.id + '/original.gpx');
-              window.open(url, '_blank', 'noopener');
-            });
             tbody.appendChild(tr);
           });
           new simpleDatatables.DataTable('#routesTable', { searchable: true, sortable: true, perPage: 25 });
