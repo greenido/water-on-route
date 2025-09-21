@@ -1,3 +1,5 @@
 routes/
 node_modules/
 old-stuff/
+.env
+/data

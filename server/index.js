@@ -20,10 +20,20 @@
  *   TILE_USER_AGENT         → UA string for tile requests
  */
 
+// Load environment variables from a local .env if present (no-op if package not installed or on Fly)
+try {
+  require('dotenv').config(); 
+} 
+catch (e) {
+  console.error('Failed to load .env file:', e);
+}
+
 const express = require('express');
 const cors = require('cors');
 const { fetch } = require('undici');
 const path = require('path');
+const fs = require('fs');
+const { initDatabase, insertRoute, listRoutes, getRouteById, DB_PATH } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,7 +44,7 @@ const TILE_URL_TEMPLATE = process.env.TILE_URL_TEMPLATE || 'https://tile.openstr
 
 app.use(cors());
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '5mb' }));
 
 // serve favicon assets
 app.get('/favicon.svg', (req, res) => {
@@ -72,6 +82,165 @@ app.get('/test.html', (req, res) => {
 // serve osmApi.js from ../osmApi.js
 app.get('/osmApi.js', (req, res) => {
   res.sendFile(path.join(__dirname, '../osmApi.js'));
+});
+
+// Basic auth middleware for admin endpoints
+function requireBasicAuth(req, res, next) {
+  const header = req.headers['authorization'] || '';
+  if (!header.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Admin"');
+    return res.status(401).send('Auth required');
+  }
+  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+  const idx = decoded.indexOf(':');
+  const user = decoded.slice(0, idx);
+  const pass = decoded.slice(idx + 1);
+  const expectedUser = process.env.ADMIN_USER;
+  const expectedPass = process.env.ADMIN_PASS;
+  if (user === expectedUser && pass === expectedPass) return next();
+  res.setHeader('WWW-Authenticate', 'Basic realm="Admin"');
+  return res.status(401).send('Invalid credentials');
+}
+
+// API: Save a route (raw GPX plus summary)
+// body: { filename, gpxText, bbox, routeKm, waypointsCount }
+app.post('/api/routes', async (req, res) => {
+  try {
+    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = req.body || {};
+    if (typeof gpxText !== 'string' || gpxText.length === 0) {
+      return res.status(400).json({ error: 'gpxText is required' });
+    }
+    const fileSize = Buffer.byteLength(gpxText, 'utf8');
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || null;
+    const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
+    return res.json({ ok: true, id: result.id });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message || 'Failed to save route' });
+  }
+});
+
+// API: List routes (protected)
+app.get('/api/routes', requireBasicAuth, async (_req, res) => {
+  try {
+    const rows = await listRoutes();
+    return res.json({ ok: true, routes: rows });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e.message || 'Failed to list routes' });
+  }
+});
+
+// Download endpoints (protected)
+app.get('/api/routes/:id/original.gpx', requireBasicAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).send('Invalid id');
+    const row = await getRouteById(id);
+    if (!row || !row.gpxText) return res.status(404).send('Not found');
+    const fname = (row.filename && row.filename.replace(/[^a-zA-Z0-9_.-]+/g, '_')) || `route-${id}.gpx`;
+    res.setHeader('Content-Type', 'application/gpx+xml; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(row.gpxText);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to download');
+  }
+});
+
+app.get('/api/routes/:id/enriched.gpx', requireBasicAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).send('Invalid id');
+    const row = await getRouteById(id);
+    if (!row || !row.enrichedGpxText) return res.status(404).send('Enriched GPX not found');
+    const base = (row.filename && row.filename.replace(/[^a-zA-Z0-9_.-]+/g, '_').replace(/\.gpx$/i, '')) || `route-${id}`;
+    const fname = `${base}-enriched.gpx`;
+    res.setHeader('Content-Type', 'application/gpx+xml; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(row.enrichedGpxText);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to download');
+  }
+});
+
+// Admin page (protected)
+app.get('/admin', requireBasicAuth, (req, res) => {
+  res.type('html');
+  res.send(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Routes Admin</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/style.css">
+    <style>body{background:#0f172a;color:#e2e8f0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol} .wrap{max-width:1100px;margin:24px auto;padding:0 16px} .card{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:16px} h1{font-size:18px;margin:0 0 12px}</style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Saved Routes</h1>
+      <div class="card">
+        <table id="routesTable" class="display">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Filename</th>
+              <th>Size (KB)</th>
+              <th>Route (km)</th>
+              <th>Waypoints</th>
+              <th>Uploaded</th>
+              <th>IP</th>
+              <th>Downloads</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p style="opacity:.7;margin-top:8px">DB path: ${DB_PATH}</p>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3" defer></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', async () => {
+        try {
+          const resp = await fetch('/api/routes', { headers: { 'Accept': 'application/json' } });
+          const data = await resp.json();
+          const routes = (data && data.routes) || [];
+          const tbody = document.querySelector('#routesTable tbody');
+          routes.forEach(r => {
+            const tr = document.createElement('tr');
+            const kb = r.fileSize ? Math.round(r.fileSize / 1024) : '';
+            const safeName = (r.filename || '').toString();
+            const dlOriginal = '<a href="/api/routes/' + r.id + '/original.gpx" target="_blank" rel="noopener">🏁 Original</a>';
+            const dlEnriched = r.hasEnriched ? (' | <a href="/api/routes/' + r.id + '/enriched.gpx" target="_blank" rel="noopener">💧 Enriched</a>') : '';
+            tr.innerHTML = 
+              '<td>' + r.id + '</td>' +
+              '<td>' + safeName + '</td>' +
+              '<td>' + kb + '</td>' +
+              '<td>' + (r.routeKm ?? '') + '</td>' +
+              '<td>' + (r.waypointsCount ?? '') + '</td>' +
+              '<td>' + (r.uploadedAt || '') + '</td>' +
+              '<td>' + (r.clientIp || '') + '</td>' +
+              '<td>' + dlOriginal + dlEnriched + '</td>';
+            // Row click: open enriched if available, otherwise original
+            tr.style.cursor = 'pointer';
+            tr.addEventListener('click', (e) => {
+              const tag = (e.target && e.target.tagName || '').toLowerCase();
+              if (tag === 'a' || tag === 'button') return; // let link clicks work
+              const url = r.hasEnriched ? ('/api/routes/' + r.id + '/enriched.gpx') : ('/api/routes/' + r.id + '/original.gpx');
+              window.open(url, '_blank', 'noopener');
+            });
+            tbody.appendChild(tr);
+          });
+          new simpleDatatables.DataTable('#routesTable', { searchable: true, sortable: true, perPage: 25 });
+        } catch (e) {
+          console.error(e);
+          alert('Failed to load routes');
+        }
+      });
+    </script>
+  </body>
+</html>`);
 });
 
 //
@@ -148,10 +317,18 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Local proxy listening on http://localhost:${PORT}`);
-  console.log(`Overpass upstream: ${OVERPASS_URL}`);
-  console.log(`Tile upstream: ${TILE_URL_TEMPLATE}`);
-});
+initDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`🍎 Local proxy listening on http://localhost:${PORT}`);
+      console.log(`🍯 Overpass upstream: ${OVERPASS_URL}`);
+      console.log(`🍯 Tile upstream: ${TILE_URL_TEMPLATE}`);
+      console.log(`㏈ - Database initialized at ${DB_PATH}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to init DB', err);
+    process.exit(1);
+  });
 
 

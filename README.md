@@ -14,6 +14,7 @@ Find potable water sources along a GPX route. Upload a GPX file, visualize your 
 - One-click download of an enriched `.gpx` including water waypoints
 - Local proxy for Overpass and tiles to avoid CORS and respect usage policies
 - Optional Docker stack to run Overpass and a local raster tile server
+- Save uploaded routes to SQLite and review them in an admin table
 
 ---
 
@@ -27,6 +28,12 @@ You can run against public services or spin up everything locally.
 npm install
 npm start
 # Open http://localhost:3000
+```
+
+Admin (basic auth) credentials defaults:
+
+```bash
+ADMIN_USER=your-user ADMIN_PASS='your-password' npm start
 ```
 
 This uses the default upstreams in `server/index.js`:
@@ -90,6 +97,7 @@ water-on-route/
 │  └─ losAltos-MorganHill.gpx  # Example route
 ├─ server/
 │  └─ index.js         # Express server + Overpass/tile proxy
+│  └─ db.js            # SQLite init and helpers
 ├─ docker-compose.yml  # Local Overpass + tile server stack
 ├─ README-local.md     # Local quick notes
 └─ package.json
@@ -131,6 +139,7 @@ If you leave variables unset, sane defaults will be used:
 - `OVERPASS_URL`: `https://overpass-api.de/api/interpreter`
 - `TILE_URL_TEMPLATE`: `https://tile.openstreetmap.org/{z}/{x}/{y}.png`
 - `PORT`: `3000`
+- `ROUTES_DB_PATH`: path to SQLite file (default `/data/routes.sqlite3` if available)
 
 The frontend is preconfigured in `index.html` to call the local proxy:
 
@@ -174,6 +183,16 @@ The Express server exposes a few endpoints:
 - `GET /tiles/{z}/{x}/{y}.png` – tile proxy
   - Fetches the tile from `TILE_URL_TEMPLATE` and forwards it with caching headers
 
+### Routes persistence API
+
+- `POST /api/routes` – Save an uploaded route
+  - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount }`
+  - Returns: `{ ok: true, id }`
+- `GET /api/routes` – List saved routes (protected)
+  - Basic Auth required (see below)
+  - Returns: `{ ok: true, routes: [...] }`
+- `GET /admin` – Admin UI: sortable/filterable table of routes (protected)
+
 ---
 
 ## Docker services
@@ -195,6 +214,21 @@ The Express server exposes a few endpoints:
   - Volume: `tiles-data:/data`
 
 You can change `OVERPASS_PLANET_URL` to target a different region or the entire planet.
+
+---
+
+## Deploying to Fly.io
+
+Persistent storage is required for the SQLite database. This repo's `fly.toml` mounts a volume at `/data`.
+
+Create and attach a volume named `wor_data` (adjust size/region as needed):
+
+```bash
+fly volumes create wor_data --size 1 --region sjc
+fly deploy
+```
+
+Ensure your service listens on port 3000 (already configured) and the volume mount is present under `[[mounts]]` with `destination = "/data"`.
 
 ---
 
