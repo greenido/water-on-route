@@ -26,11 +26,12 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "nodemon server/index.js" 
+    "dev": "nodemon server/index.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "sqlite3": "^5.1.7",
     "undici": "^6.19.8"
