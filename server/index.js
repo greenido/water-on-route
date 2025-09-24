@@ -312,14 +312,15 @@ app.get('/admin', requireBasicAuth, (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Routes Admin</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/style.css">
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>body{background:#0f172a;color:#e2e8f0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol} .wrap{max-width:1100px;margin:24px auto;padding:0 16px} .card{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:16px} h1{font-size:18px;margin:0 0 12px} .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch} #routesTable{width:100%} #routesTable td.route-cell{max-width:340px;white-space:normal;word-break:break-word;overflow-wrap:anywhere} @media (max-width:720px){ #routesTable td.route-cell{max-width:220px} }</style>
   </head>
-  <body>
+  <body class="bg-slate-950 text-slate-100">
     <div class="wrap">
-      <h1>Saved Routes</h1>
-      <div class="card" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <a href="/api/routes/all.zip" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⬇️ <span>Download all</span></a>
-        <a href="/api/admin/db.sqlite3" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🗄️ <span>Download DB</span></a>
+      <h1 class="m-0 text-lg tracking-wide font-semibold">Saved Routes</h1>
+      <div class="card mb-3 flex gap-2 flex-wrap">
+        <a href="/api/routes/all.zip" class="px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium hover:bg-sky-300 transition text-sm inline-flex items-center gap-2 shadow-sm">⬇️ <span>Download all</span></a>
+        <a href="/api/admin/db.sqlite3" class="px-3 py-2 rounded-lg bg-emerald-400 text-slate-900 font-medium hover:bg-emerald-300 transition text-sm inline-flex items-center gap-2 shadow-sm">🗄️ <span>Download DB</span></a>
       </div>
       <div class="card">
         <div class="table-wrap">
