@@ -252,12 +252,31 @@ function safeParseJson(txt) {
   }
 }
 
+function deleteRouteById(id) {
+  const startTime = Date.now();
+  console.info('[db.deleteRouteById] start', { id });
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM routes WHERE id = ?`, [id], function(err) {
+      if (err) {
+        const elapsedMs = Date.now() - startTime;
+        console.error('[db.deleteRouteById] failed', { id, elapsedMs, error: err });
+        return reject(err);
+      }
+      const elapsedMs = Date.now() - startTime;
+      const deletedCount = Number(this && this.changes) || 0;
+      console.info('[db.deleteRouteById] success', { id, deletedCount, elapsedMs });
+      resolve({ deletedCount });
+    });
+  });
+}
+
 module.exports = {
   DB_PATH,
   initDatabase,
   insertRoute,
   listRoutes,
-  getRouteById
+  getRouteById,
+  deleteRouteById
 };
 
 

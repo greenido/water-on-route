@@ -33,7 +33,7 @@ const cors = require('cors');
 const { fetch } = require('undici');
 const path = require('path');
 const fs = require('fs');
-const { initDatabase, insertRoute, listRoutes, getRouteById, DB_PATH } = require('./db');
+const { initDatabase, insertRoute, listRoutes, getRouteById, deleteRouteById, DB_PATH } = require('./db');
 const archiver = require('archiver');
 const crypto = require('crypto');
 
@@ -141,6 +141,22 @@ app.get('/api/routes', requireBasicAuth, async (_req, res) => {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: e.message || 'Failed to list routes' });
+  }
+});
+
+// API: Delete route (protected)
+app.delete('/api/routes/:id', requireBasicAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const result = await deleteRouteById(id);
+    if (!result || !result.deletedCount) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    return res.json({ ok: true, deleted: result.deletedCount });
+  } catch (e) {
+    console.error('[DELETE /api/routes/:id] error', e);
+    return res.status(500).json({ error: e.message || 'Failed to delete route' });
   }
 });
 
@@ -395,7 +411,41 @@ app.get('/admin', requireBasicAuth, (req, res) => {
               });
             }
           });
-          new simpleDatatables.DataTable('#routesTable', { searchable: true, sortable: true, perPage: 25 });
+          const dt = new simpleDatatables.DataTable('#routesTable', { searchable: true, sortable: true, perPage: 25 });
+
+          // Add Delete column and buttons after table is initialized
+          const table = document.querySelector('#routesTable');
+          const theadRow = table.querySelector('thead tr');
+          const th = document.createElement('th');
+          th.textContent = 'Actions';
+          theadRow.appendChild(th);
+
+          const rows = table.querySelectorAll('tbody tr');
+          rows.forEach((row, idx) => {
+            const idCell = row.children[0];
+            const id = Number(idCell && idCell.textContent);
+            const td = document.createElement('td');
+            const btn = document.createElement('button');
+            btn.textContent = '🗑️ Delete';
+            btn.className = 'px-2 py-1 rounded bg-red-500/90 hover:bg-red-400 text-slate-900 text-sm';
+            btn.addEventListener('click', async () => {
+              if (!confirm('Delete route #' + id + '? This cannot be undone.')) return;
+              try {
+                const resp = await fetch('/api/routes/' + id, { method: 'DELETE' });
+                if (!resp.ok) {
+                  const j = await resp.json().catch(() => ({}));
+                  throw new Error(j && j.error || ('HTTP ' + resp.status));
+                }
+                // remove row from table and redraw
+                row.remove();
+                dt.refresh();
+              } catch (e) {
+                alert('Failed to delete: ' + (e && e.message || e));
+              }
+            });
+            td.appendChild(btn);
+            row.appendChild(td);
+          });
         } catch (e) {
           console.error(e);
           alert('Failed to load routes');
