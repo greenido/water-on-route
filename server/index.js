@@ -399,7 +399,7 @@ app.get('/admin', requireBasicAuth, (req, res) => {
               '<td>' + (r.routeKm ?? '') + '</td>' +
               '<td>' + (r.waypointsCount ?? '') + '</td>' +
               '<td>' + (r.uploadedAt || '') + '</td>' +
-              '<td>' + (r.clientIp || '') + '</td>' +
+              '<td class="route-cell">' + (r.clientIp || '') + '</td>' +
               '<td class="location-cell">' + (r.clientIp ? '…' : '') + '</td>' +
               '<td>' + dlOriginal + dlEnriched + '</td>';
             tbody.appendChild(tr);
