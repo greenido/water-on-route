@@ -813,6 +813,15 @@ document.addEventListener('keydown', (e) => {
     }
   }
 
+  // 'C' triggers coffee search
+  if (!isTyping && (e.key === 'C' || e.key === 'c')) {
+    if (navCoffeeBtn) {
+      e.preventDefault();
+      navCoffeeBtn.click();
+      return;
+    }
+  }
+
   // Modal-only keys
   const modalOpen = helpModal && !helpModal.classList.contains('hidden');
   if (!modalOpen) return;
