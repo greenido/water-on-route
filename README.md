@@ -1,6 +1,6 @@
 # GPX Water Mapper
 
-Find potable water sources along a GPX route. Upload a GPX file, visualize your route on a map, automatically fetch nearby water points from OpenStreetMap via Overpass, and download an enriched GPX with waypoints added.
+Find potable water sources along a GPX or Garmin FIT route. Upload a route file, visualize it on a map, automatically fetch nearby water points from OpenStreetMap via Overpass, and download an enriched GPX with waypoints added.
 
 > Built with Leaflet on the frontend and a small Express proxy for Overpass queries and tile fetching. Optional Docker services provide a local Overpass instance and a raster tile server for fully offline-friendly workflows.
 
@@ -8,7 +8,7 @@ Find potable water sources along a GPX route. Upload a GPX file, visualize your 
 
 ## Features
 
-- Upload or drag-and-drop a `.gpx` file
+- Upload or drag-and-drop a `.gpx` or Garmin `.fit` file
 - Interactive map with your route and water markers
 - Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits
 - One-click download of an enriched `.gpx` including water waypoints
@@ -157,10 +157,10 @@ The frontend is preconfigured in `index.html` to call the local proxy:
 ## Using the app
 
 1. Open `http://localhost:3000`.
-2. Click “Select GPX” or drag-and-drop a `.gpx` file.
+2. Click “Select GPX / FIT” or drag-and-drop a `.gpx` or `.fit` file.
 3. The route is parsed and displayed. The app computes the route bbox and queries Overpass for nearby water points.
 4. Water markers are added to the map. Hover/tap to see basic details.
-5. Click “Download enriched GPX” to save a new `.gpx` that includes the water waypoints along with your original track(s).
+5. Click “Download enriched GPX” to save a new `.gpx` that includes the water waypoints along with your original track(s). FIT uploads are converted to the same enriched GPX download.
 
 Implementation notes:
 
@@ -280,4 +280,4 @@ No license file is included. If you plan to publish or distribute this project, 
 ## Acknowledgements
 
 - OpenStreetMap and Overpass communities
-- Leaflet, `@tmcw/togeojson`, `togpx`, Express, and Undici
+- Leaflet, `@tmcw/togeojson`, `togpx`, `fit-file-parser`, Express, and Undici

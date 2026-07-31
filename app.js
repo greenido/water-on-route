@@ -1,6 +1,6 @@
 /**
  * Water on Route — Client App
- * Purpose: Leaflet-based GPX viewer that finds near-route water points via Overpass
+ * Purpose: Leaflet-based GPX/FIT viewer that finds near-route water points via Overpass
  *          and exports an enriched GPX with waypoints.
  *
  * Dependencies provided by HTML (globals):
@@ -10,12 +10,16 @@
  *
  * ESM imports:
  *   - fetchOSMWaterPointsAdaptive from ./osmApi.js
+ *   - parseFitToGeoJSON from ./fitToGeoJSON.js
  *
  * UX features:
- *   - Drag & drop or file picker for GPX
+ *   - Drag & drop or file picker for GPX / FIT
  *   - Base layer switcher and animated water markers
  *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download
  */
+
+import { fetchOSMWaterPointsAdaptive, fetchOverpassCoffeePoints } from './osmApi.js';
+import { parseFitToGeoJSON } from './fitToGeoJSON.js';
 
 // Basic UI elements
 const fileInput = document.getElementById('gpxFile');
@@ -423,11 +427,13 @@ async function renderWaterMarkers(points, animate = false) {
         : null;
       // Try to get the original GPX text if available
       const gpxText = typeof originalGpxText !== 'undefined' ? originalGpxText : null;
-      // Compose filename if possible
-      const filename = (typeof fileInput !== 'undefined' && fileInput && fileInput.files && fileInput.files[0])
+      // Compose filename if possible (FIT uploads are stored as GPX text)
+      let filename = (typeof fileInput !== 'undefined' && fileInput && fileInput.files && fileInput.files[0])
         ? fileInput.files[0].name
         : 'route.gpx';
-      // Build enriched GPX and include water points
+      if (/\.fit$/i.test(filename)) {
+        filename = filename.replace(/\.fit$/i, '.gpx');
+      }      // Build enriched GPX and include water points
       await ensureToGpxAvailable();
       const routeGeo = (routeLayer && typeof routeLayer.toGeoJSON === 'function') ? routeLayer.toGeoJSON() : currentRouteGeoJSON;
       const routeFC = routeGeo && routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
@@ -543,7 +549,7 @@ function resetApp() {
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
     if (dropZone && dropZone.classList) dropZone.classList.remove('dragover');
-    setStatus('Load a GPX file to begin.');
+    setStatus('Load a GPX or FIT file to begin.');
     // Re-center view
     centerMapOnUser();
     // Notify user
@@ -585,6 +591,16 @@ function showHelpModal(show) {
   }
 }
 
+function routeFileKind(file) {
+  const name = (file?.name || '').toLowerCase();
+  if (name.endsWith('.fit')) return 'fit';
+  if (name.endsWith('.gpx')) return 'gpx';
+  // Fallback by MIME when extension is missing
+  const type = (file?.type || '').toLowerCase();
+  if (type.includes('gpx') || type.includes('xml')) return 'gpx';
+  return null;
+}
+
 async function parseGpxFile(file) {
   const text = await file.text();
   originalGpxText = text;
@@ -595,6 +611,25 @@ async function parseGpxFile(file) {
     throw new Error('No features found in GPX.');
   }
   return geojson;
+}
+
+async function parseFitFile(file) {
+  const buffer = await file.arrayBuffer();
+  const geojson = await parseFitToGeoJSON(buffer);
+  // Persist a GPX representation so admin/original downloads still work
+  await ensureToGpxAvailable();
+  const toGpxFn = (typeof window !== 'undefined' && window.togpx) || (typeof globalThis !== 'undefined' && globalThis.togpx);
+  originalGpxText = typeof toGpxFn === 'function'
+    ? toGpxFn(geojson, { creator: 'GPX Water Mapper (from FIT)' })
+    : '';
+  return geojson;
+}
+
+async function parseRouteFile(file) {
+  const kind = routeFileKind(file);
+  if (kind === 'fit') return parseFitFile(file);
+  if (kind === 'gpx') return parseGpxFile(file);
+  throw new Error('Unsupported file type. Please upload a .gpx or .fit file.');
 }
 
 function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters) {
@@ -633,13 +668,10 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-// Import adaptive OSM utilities
-import { fetchOSMWaterPointsAdaptive, fetchOverpassCoffeePoints } from './osmApi.js';
-
-async function handleGpx(file) {
+async function handleRouteFile(file) {
   setError('');
   setStatus(`Parsing ${file.name} …`);
-  const geojson = await parseGpxFile(file);
+  const geojson = await parseRouteFile(file);
   renderRoute(geojson);
   currentRouteGeoJSON = geojson;
   setStatus('Computing bounding box …');
@@ -669,7 +701,7 @@ async function handleGpx(file) {
 // Events
 fileInput.addEventListener('change', () => {
   const f = fileInput.files?.[0];
-  if (f) handleGpx(f).catch(err => setError(err.message || String(err)));
+  if (f) handleRouteFile(f).catch(err => setError(err.message || String(err)));
 });
 
 dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -677,7 +709,7 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover
 dropZone.addEventListener('drop', (e) => {
   e.preventDefault(); dropZone.classList.remove('dragover');
   const f = e.dataTransfer?.files?.[0];
-  if (f) handleGpx(f).catch(err => setError(err.message || String(err)));
+  if (f) handleRouteFile(f).catch(err => setError(err.message || String(err)));
 });
 
 downloadBtn.addEventListener('click', async () => {
@@ -694,7 +726,7 @@ downloadBtn.addEventListener('click', async () => {
   }
 });
 
-setStatus('Load a GPX file to begin.');
+setStatus('Load a GPX or FIT file to begin.');
 // Ensure loading overlay is hidden on initial load until a file is processed
 
 console.log('-- Ensuring loading overlay is hidden on initial load until a file is processed');

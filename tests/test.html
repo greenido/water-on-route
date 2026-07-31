@@ -69,9 +69,64 @@
         log(calls >= 3, 'exponential backoff triggers on 429');
       }
 
+      async function testFitToGeoJSON() {
+        const { parseFitToGeoJSON, fitDataToGeoJSON, coordinatesFromFitPoints } = await import('./fitToGeoJSON.js');
+
+        const coords = coordinatesFromFitPoints([
+          { position_lat: 37.1, position_long: -122.1, altitude: 10 },
+          { position_lat: 91, position_long: 0 },
+          { position_lat: 37.2, position_long: -122.2 },
+        ]);
+        if (coords.length !== 2 || coords[0][2] !== 10) {
+          log(false, 'FIT coordinatesFromFitPoints filters invalid points', JSON.stringify(coords));
+          return;
+        }
+        log(true, 'FIT coordinatesFromFitPoints filters invalid points');
+
+        try {
+          fitDataToGeoJSON({ records: [{ position_lat: 1, position_long: 2 }] });
+          log(false, 'FIT fitDataToGeoJSON requires 2+ points', 'did not throw');
+        } catch (e) {
+          log(/No GPS track/.test(e.message), 'FIT fitDataToGeoJSON requires 2+ points');
+        }
+
+        // Load FitParser from CDN and parse a tiny synthetic path via fitDataToGeoJSON only
+        // (full binary FIT parse is covered offline; keep this test network-light)
+        const geo = fitDataToGeoJSON({
+          records: [
+            { position_lat: 37.3861, position_long: -122.0839 },
+            { position_lat: 37.3900, position_long: -122.0800 },
+            { position_lat: 37.3950, position_long: -122.0750 },
+          ],
+          sessions: [{ sport: 'cycling' }],
+        });
+        const ok = geo?.features?.[0]?.geometry?.type === 'LineString'
+          && geo.features[0].geometry.coordinates.length === 3
+          && geo.features[0].properties.source === 'fit:records';
+        log(ok, 'FIT fitDataToGeoJSON builds LineString FeatureCollection');
+
+        // Confirm CDN FitParser loads (used by parseFitToGeoJSON)
+        try {
+          const mod = await import('https://cdn.jsdelivr.net/npm/fit-file-parser@4.1.0/+esm');
+          const FitParser = mod?.default || mod?.FitParser;
+          if (typeof FitParser !== 'function') throw new Error('no FitParser export');
+          // Empty / invalid buffer should reject
+          let rejected = false;
+          try {
+            await parseFitToGeoJSON(new ArrayBuffer(4), { FitParser });
+          } catch (_) {
+            rejected = true;
+          }
+          log(rejected, 'FIT parseFitToGeoJSON rejects invalid buffer');
+        } catch (e) {
+          log(false, 'FIT FitParser CDN load', e.message);
+        }
+      }
+
       async function run() {
         try { await testAdaptiveSplitOn400(); } catch (e) { log(false, 'adaptive split handles 400', e.message); }
         try { await testBackoff429(); } catch (e) { log(false, 'exponential backoff triggers on 429', e.message); }
+        try { await testFitToGeoJSON(); } catch (e) { log(false, 'FIT parsing helpers', e.message); }
       }
 
       run();
