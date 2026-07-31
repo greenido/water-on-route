@@ -147,7 +147,8 @@ If you leave variables unset, sane defaults will be used:
 - `TILE_URL_TEMPLATE`: `https://tile.openstreetmap.org/{z}/{x}/{y}.png`
 - `PORT`: `3000`
 - `ROUTES_DB_PATH`: path to SQLite file (default `/data/routes.sqlite3` if available)
-- `TRUST_PROXY_HOPS`: trusted reverse-proxy hop count (Fly.io uses `1`)
+- `TRUST_PROXY_HOPS`: trusted reverse-proxy hop count (Fly.io uses `1`);
+  leave unset when clients connect directly
 - `UPLOAD_RATE_LIMIT`: route uploads per client per 15 minutes (default `20`)
 - `PROXY_RATE_LIMIT`: Overpass requests per client per 15 minutes (default `120`)
 - `TILE_RATE_LIMIT`: tile requests per client per 15 minutes (default `600`)

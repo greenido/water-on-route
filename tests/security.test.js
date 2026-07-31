@@ -6,7 +6,8 @@ const {
   validateRoutePayload,
   validateTileCoordinates,
   isAllowedOrigin,
-  normalizeHttpUrl
+  normalizeHttpUrl,
+  positiveInteger
 } = require('../server/security');
 
 test('safeEqual accepts equal values and rejects different lengths and values', () => {
@@ -68,4 +69,11 @@ test('normalizeHttpUrl accepts HTTP URLs and rejects script schemes', () => {
   assert.equal(normalizeHttpUrl('https://example.com/path'), 'https://example.com/path');
   assert.equal(normalizeHttpUrl('example.com'), 'https://example.com/');
   assert.equal(normalizeHttpUrl('javascript:alert(1)'), null);
+});
+
+test('positiveInteger bounds numeric environment configuration', () => {
+  assert.equal(positiveInteger(undefined, 20, 1, 100), 20);
+  assert.equal(positiveInteger('25', 20, 1, 100), 25);
+  assert.throws(() => positiveInteger('0', 20, 1, 100), /between 1 and 100/);
+  assert.throws(() => positiveInteger('not-a-number', 20, 1, 100), /between 1 and 100/);
 });

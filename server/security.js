@@ -126,11 +126,21 @@ function normalizeHttpUrl(value) {
   }
 }
 
+function positiveInteger(value, fallback, minimum, maximum) {
+  if (value == null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`Configuration value must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
 module.exports = {
   MAX_GPX_BYTES,
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
   isAllowedOrigin,
-  normalizeHttpUrl
+  normalizeHttpUrl,
+  positiveInteger
 };

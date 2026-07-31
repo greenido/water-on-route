@@ -42,7 +42,8 @@ const {
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
-  isAllowedOrigin
+  isAllowedOrigin,
+  positiveInteger
 } = require('./security');
 
 const app = express();
@@ -52,9 +53,23 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 // Configurable upstreams
 const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 const TILE_URL_TEMPLATE = process.env.TILE_URL_TEMPLATE || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OVERPASS_TIMEOUT_MS = positiveInteger(process.env.OVERPASS_TIMEOUT_MS, 60000, 1000, 120000);
+const TILE_TIMEOUT_MS = positiveInteger(process.env.TILE_TIMEOUT_MS, 20000, 1000, 60000);
+const OVERPASS_MAX_RESPONSE_BYTES = positiveInteger(
+  process.env.OVERPASS_MAX_RESPONSE_BYTES,
+  8 * 1024 * 1024,
+  64 * 1024,
+  32 * 1024 * 1024
+);
+const TILE_MAX_RESPONSE_BYTES = positiveInteger(
+  process.env.TILE_MAX_RESPONSE_BYTES,
+  2 * 1024 * 1024,
+  16 * 1024,
+  8 * 1024 * 1024
+);
 
 if (process.env.TRUST_PROXY_HOPS) {
-  app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
+  app.set('trust proxy', positiveInteger(process.env.TRUST_PROXY_HOPS, 1, 1, 10));
 } else if (process.env.FLY_APP_NAME || process.env.FLY_MACHINE) {
   app.set('trust proxy', 1);
 }
@@ -75,7 +90,15 @@ app.use(helmet({
         'https://unpkg.com'
       ],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net', 'https://unpkg.com'],
-      imgSrc: ["'self'", 'data:', 'blob:'],
+      imgSrc: [
+        "'self'",
+        'data:',
+        'blob:',
+        'https://unpkg.com',
+        'https://*.tile.openstreetmap.org',
+        'https://*.tile.opentopomap.org',
+        'https://server.arcgisonline.com'
+      ],
       connectSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -95,22 +118,22 @@ const limiterDefaults = {
 };
 const uploadLimiter = rateLimit({
   ...limiterDefaults,
-  limit: Number(process.env.UPLOAD_RATE_LIMIT || 20),
+  limit: positiveInteger(process.env.UPLOAD_RATE_LIMIT, 20, 1, 10000),
   message: { error: 'Too many route uploads; try again later' }
 });
 const proxyLimiter = rateLimit({
   ...limiterDefaults,
-  limit: Number(process.env.PROXY_RATE_LIMIT || 120),
+  limit: positiveInteger(process.env.PROXY_RATE_LIMIT, 120, 1, 10000),
   message: 'Proxy rate limit exceeded'
 });
 const tileLimiter = rateLimit({
   ...limiterDefaults,
-  limit: Number(process.env.TILE_RATE_LIMIT || 600),
+  limit: positiveInteger(process.env.TILE_RATE_LIMIT, 600, 1, 100000),
   message: 'Tile rate limit exceeded'
 });
 const adminLimiter = rateLimit({
   ...limiterDefaults,
-  limit: Number(process.env.ADMIN_RATE_LIMIT || 60),
+  limit: positiveInteger(process.env.ADMIN_RATE_LIMIT, 60, 1, 10000),
   message: 'Admin rate limit exceeded'
 });
 
@@ -424,7 +447,7 @@ app.get('/admin', adminLimiter, requireBasicAuth, (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Routes Admin</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/style.css" integrity="sha384-xnK68E/OAsSGcbvbeWEOyhjix2K7rBxt8Eytj/Ow9zuPG7WwFGGqMPQ8SbexlsL0" crossorigin="anonymous">
-    <script nonce="${nonce}" src="https://cdn.tailwindcss.com" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
+    <script nonce="${nonce}" src="https://cdn.tailwindcss.com/3.4.17" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
     <style nonce="${nonce}">body{background:#0f172a;color:#e2e8f0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol} .wrap{max-width:1100px;margin:24px auto;padding:0 16px} .card{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:16px} h1{font-size:18px;margin:0 0 12px} .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch} #routesTable{width:100%} #routesTable td.route-cell{max-width:340px;white-space:normal;word-break:break-word;overflow-wrap:anywhere} @media (max-width:720px){ #routesTable td.route-cell{max-width:220px} }</style>
   </head>
   <body class="bg-slate-950 text-slate-100">
@@ -455,7 +478,7 @@ app.get('/admin', adminLimiter, requireBasicAuth, (req, res) => {
         </div>
       </div>
     </div>
-    <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3" integrity="sha384-IcefnZaMCtDiSE2p4HhAg75sODUAq5J6cACfphqpslFg2cUyu+WPD+942g1NfZqr" crossorigin="anonymous" defer></script>
+    <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/umd/simple-datatables.js" integrity="sha384-qknKzrIWsL9I5CVZxbBKS2IOVnXBRjl0gucgQ7xGPQLH6yN7agkTKPtOyGg2ujCl" crossorigin="anonymous" defer></script>
     <script nonce="${nonce}">
       document.addEventListener('DOMContentLoaded', async () => {
         try {
@@ -602,8 +625,7 @@ async function readUpstreamBody(response, maxBytes) {
 app.post('/api/overpass', proxyLimiter, requireSameOrigin, async (req, res) => {
   try {
     const controller = new AbortController();
-    const timeoutMs = Number(process.env.OVERPASS_TIMEOUT_MS || 60000);
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
     try {
       let body;
       let headers;
@@ -626,7 +648,7 @@ app.post('/api/overpass', proxyLimiter, requireSameOrigin, async (req, res) => {
       const upstreamResp = await fetch(OVERPASS_URL, { method: 'POST', headers, body, signal: controller.signal });
       const responseBody = await readUpstreamBody(
         upstreamResp,
-        Number(process.env.OVERPASS_MAX_RESPONSE_BYTES || 8 * 1024 * 1024)
+        OVERPASS_MAX_RESPONSE_BYTES
       );
       res.status(upstreamResp.status);
       // Pass through content type if available
@@ -651,8 +673,7 @@ app.get('/tiles/:z/:x/:y.png', tileLimiter, async (req, res) => {
   const upstream = TILE_URL_TEMPLATE.replace('{z}', z).replace('{x}', x).replace('{y}', y);
   try {
     const controller = new AbortController();
-    const timeoutMs = Number(process.env.TILE_TIMEOUT_MS || 20000);
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), TILE_TIMEOUT_MS);
     try {
       const upstreamResp = await fetch(upstream, {
         method: 'GET',
@@ -669,7 +690,7 @@ app.get('/tiles/:z/:x/:y.png', tileLimiter, async (req, res) => {
       }
       const buf = await readUpstreamBody(
         upstreamResp,
-        Number(process.env.TILE_MAX_RESPONSE_BYTES || 2 * 1024 * 1024)
+        TILE_MAX_RESPONSE_BYTES
       );
       res.setHeader('Content-Length', String(buf.length));
       return res.end(buf);
