@@ -15,6 +15,7 @@
     <h1 class="m-0 text-lg tracking-wide font-semibold">💧GPX Water Mapper</h1>
     <nav class="flex items-center gap-2">
       <button id="navNewBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🧹 <span>Clean map</span></button>
+      <button id="navCoffeeBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2" title="Search coffee along the route">☕ <span>Search coffee</span></button>
       <a href="https://greenido.github.io/weather-4-bike/" target="_blank" rel="noopener" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⛅ <span>Weather</span></a>
       <button id="navHelpBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">❓ <span>Help</span></button>
     </nav>
@@ -77,6 +78,13 @@
           <li>The map shows found water sources. Hover/tap markers for details.</li>
           <li>Click "Download enriched GPX" to save your original route with water waypoints added.</li>
           <li>Use "Clean map" anytime to clear the map and start over.</li>
+          <li>Click "Search coffee" to find nearby coffee places.</li>
+          <li>Click "Weather" to see the weather along your route.</li>
+        <li>
+          <a href="https://greenido.wordpress.com/2025/09/16/find-water-along-your-gpx-route-easily/" target="_blank" rel="noopener" class="underline text-sky-400 hover:text-sky-300">
+            Read more: Find water along your GPX route easily
+          </a>
+        </li>
         </ol>
         <div class="pt-2">
           <h3 class="text-slate-200 font-medium mb-2">Keyboard shortcuts</h3>
@@ -85,13 +93,14 @@
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">L</kbd><span>Select GPX (open file)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">N</kbd><span>Clean map (reset)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">D</kbd><span>Download enriched GPX</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">C</kbd><span>Press C (no modifiers) to trigger ☕ Search coffee</span></li>
           </ul>
         </div>
 
         <p class="text-slate-400">ℹ️ Data is fetched from Overpass (proxied locally when available) or directly from OSM. Results depend on OSM coverage.</p>
         <p class="text-slate-400">
           💧 Call <a href="https://x.com/greenido" target="_blank" rel="noopener" class="underline text-sky-400 hover:text-sky-300">Ido</a>
-           if you need more help (or water or a 🍺)
+           if you need more help
         </p>
       </div>
       <div class="p-4 border-t border-slate-800 text-right">

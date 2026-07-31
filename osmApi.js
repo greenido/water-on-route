@@ -58,6 +58,26 @@ export function buildOverpassWaterQuery(b) {
   `;
 }
 
+// Build Overpass query for coffee-related POIs
+export function buildOverpassCoffeeQuery(b) {
+  const bboxPart = `${b.minlat},${b.minlon},${b.maxlat},${b.maxlon}`; // lat,lon order for Overpass bbox
+  return `
+    [out:xml][timeout:25];
+    (
+      node["amenity"="cafe"](${bboxPart});
+      node["shop"="coffee"](${bboxPart});
+      node["amenity"="restaurant"]["cuisine"~"coffee|cafe", i](${bboxPart});
+      way["amenity"="cafe"](${bboxPart});
+      way["shop"="coffee"](${bboxPart});
+      way["amenity"="restaurant"]["cuisine"~"coffee|cafe", i](${bboxPart});
+      relation["amenity"="cafe"](${bboxPart});
+      relation["shop"="coffee"](${bboxPart});
+      relation["amenity"="restaurant"]["cuisine"~"coffee|cafe", i](${bboxPart});
+    );
+    out body center qt;
+  `;
+}
+
 export async function fetchOverpassXml(bbox, timeoutMs = 30000, fetchImpl) {
   const url = getOverpassUrl();
   const query = buildOverpassWaterQuery(bbox);
@@ -72,6 +92,79 @@ export async function fetchOverpassXml(bbox, timeoutMs = 30000, fetchImpl) {
     throw err;
   }
   return await resp.text();
+}
+
+// Fetch coffee POIs from Overpass into unified points array (like water parser)
+export async function fetchOverpassCoffeePoints(bbox, timeoutMs = 30000, fetchImpl) {
+  const url = getOverpassUrl();
+  const query = buildOverpassCoffeeQuery(bbox);
+  const body = 'data=' + encodeURIComponent(query);
+  const resp = await fetchWithTimeout(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body }, timeoutMs, fetchImpl);
+  if (!resp.ok) {
+    let serverMsg = '';
+    try { serverMsg = await resp.text(); } catch (_) {}
+    const trimmed = serverMsg ? serverMsg.slice(0, 200) : '';
+    const err = new Error(`Overpass error: ${resp.status}${trimmed ? ` - ${trimmed}` : ''}`);
+    err.status = resp.status;
+    throw err;
+  }
+  const xmlText = await resp.text();
+  return parseOsmXmlGeneric(xmlText);
+}
+
+// Parse generic POIs (cafe/coffee/restaurant) similarly to water parser
+export function parseOsmXmlGeneric(xmlText) {
+  const parser = new DOMParser();
+  const xml = parser.parseFromString(xmlText, 'application/xml');
+  const results = [];
+
+  const collectTags = (el) => {
+    const tagEls = Array.from(el.getElementsByTagName('tag'));
+    const tags = {};
+    for (const t of tagEls) {
+      const k = t.getAttribute('k');
+      const v = t.getAttribute('v');
+      if (k) tags[k] = v;
+    }
+    return tags;
+  };
+
+  // Nodes
+  for (const node of Array.from(xml.getElementsByTagName('node'))) {
+    const tags = collectTags(node);
+    const id = Number(node.getAttribute('id'));
+    const lat = Number(node.getAttribute('lat'));
+    const lon = Number(node.getAttribute('lon'));
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      results.push({ id, lat, lon, tags, _type: 'node' });
+    }
+  }
+
+  // Ways
+  for (const way of Array.from(xml.getElementsByTagName('way'))) {
+    const tags = collectTags(way);
+    const id = Number(way.getAttribute('id'));
+    const centerEl = way.getElementsByTagName('center')[0];
+    const lat = centerEl ? Number(centerEl.getAttribute('lat')) : NaN;
+    const lon = centerEl ? Number(centerEl.getAttribute('lon')) : NaN;
+    const result = { id, tags, _type: 'way' };
+    if (Number.isFinite(lat) && Number.isFinite(lon)) result.center = { lat, lon };
+    results.push(result);
+  }
+
+  // Relations
+  for (const rel of Array.from(xml.getElementsByTagName('relation'))) {
+    const tags = collectTags(rel);
+    const id = Number(rel.getAttribute('id'));
+    const centerEl = rel.getElementsByTagName('center')[0];
+    const lat = centerEl ? Number(centerEl.getAttribute('lat')) : NaN;
+    const lon = centerEl ? Number(centerEl.getAttribute('lon')) : NaN;
+    const result = { id, tags, _type: 'relation' };
+    if (Number.isFinite(lat) && Number.isFinite(lon)) result.center = { lat, lon };
+    results.push(result);
+  }
+
+  return results;
 }
 
 export function parseOsmXmlForWater(xmlText) {

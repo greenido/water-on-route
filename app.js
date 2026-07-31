@@ -29,6 +29,7 @@ let selectedRadiusMeters = Number(radiusSelect?.value) || 150;
 // Top nav + help modal elements
 const navNewBtn = document.getElementById('navNewBtn');
 const navHelpBtn = document.getElementById('navHelpBtn');
+const navCoffeeBtn = document.getElementById('navCoffeeBtn');
 const helpModal = document.getElementById('helpModal');
 const helpOverlay = document.getElementById('helpOverlay');
 const helpPanel = document.getElementById('helpPanel');
@@ -156,12 +157,15 @@ let routeLayer = null;
 let currentRouteGeoJSON = null;
 let waterLayer = L.layerGroup().addTo(map);
 const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
+let coffeeLayer = L.layerGroup().addTo(map);
+const baseCoffeeIcon = () => L.divIcon({ className: 'water-marker', html: '☕', iconSize: [24, 24], iconAnchor: [12, 12] });
 let originalGpxText = '';
 let foundWaterPoints = [];
+let foundCoffeePoints = [];
 let layersControl = null;
 
 // Layers control: allow switching base maps and toggling overlays
-layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer }, { collapsed: true }).addTo(map);
+layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
 
 // Helpers
 function setStatus(msg) { statusEl.textContent = msg || ''; }
@@ -389,13 +393,11 @@ async function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
   points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.description) || 'Water';
-    const type = p._type || p.tags?.amenity || p.tags?.natural || p.tags?.man_made || 'water';
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
-    const typeDisplay = p._type === 'node' ? 'node 🚰' : type;
     const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
-      .bindPopup(`<b>${name}</b><br>Type: ${typeDisplay}<br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`)
+      .bindPopup(`<b>${name}</b><br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`)
       .addTo(waterLayer);
     if (animate) {
       marker.on('add', () => {
@@ -457,6 +459,69 @@ async function renderWaterMarkers(points, animate = false) {
   }
 }
 
+async function renderCoffeeMarkers(points, animate = false) {
+  coffeeLayer.clearLayers();
+  points.forEach((p, idx) => {
+    const name = p.tags && (p.tags.name || p.tags.brand || p.tags.operator || p.tags.description) || 'Coffee';
+    const type = p._type || p.tags?.amenity || p.tags?.shop || 'cafe';
+    const lat = p.lat || p.center?.lat;
+    const lon = p.lon || p.center?.lon;
+    if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    // Build address and details
+    const tags = p.tags || {};
+    const addrParts = [
+      tags['addr:housenumber'],
+      tags['addr:street'],
+    ].filter(Boolean);
+    const cityParts = [
+      tags['addr:city'] || tags['addr:town'] || tags['addr:village'],
+      tags['addr:state'] || tags['addr:province'],
+      tags['addr:postcode'],
+    ].filter(Boolean);
+    const addressLine = addrParts.length ? addrParts.join(' ') : '';
+    const cityLine = cityParts.length ? cityParts.join(', ') : '';
+    const fullAddress = [addressLine, cityLine].filter(Boolean).join(', ');
+
+    const hours = tags['opening_hours'];
+    const phone = tags['phone'] || tags['contact:phone'];
+    const website = tags['website'] || tags['contact:website'];
+    const operator = tags['operator'];
+    const brand = tags['brand'];
+    const cuisine = tags['cuisine'];
+
+    const details = [
+      fullAddress ? `<div>${fullAddress}</div>` : '',
+      hours ? `<div>Hours: ${hours}</div>` : '',
+      phone ? `<div>Phone: <a href="tel:${phone}">${phone}</a></div>` : '',
+      website ? `<div><a href="${website}" target="_blank" rel="noopener">Website</a></div>` : '',
+      operator ? `<div>Operator: ${operator}</div>` : '',
+      brand ? `<div>Brand: ${brand}</div>` : '',
+      cuisine ? `<div>Cuisine: ${cuisine}</div>` : '',
+    ].filter(Boolean).join('');
+
+    const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${lat.toFixed(5)},${lon.toFixed(5)},17z`;
+
+    const marker = L.marker([lat, lon], { title: name, icon: baseCoffeeIcon() })
+      .bindPopup(
+        `<b>${name}</b>` +
+        (details ? `<br>${details}` : '') +
+        `<br><a href="${mapsUrl}" target="_blank" rel="noopener">Open in Google Maps</a>`
+      )
+      .addTo(coffeeLayer);
+    if (animate) {
+      marker.on('add', () => {
+        requestAnimationFrame(() => {
+          const el = marker.getElement();
+          if (el) {
+            el.classList.add('drop-anim');
+            el.style.animationDelay = `${Math.min(idx * 15, 600)}ms`;
+          }
+        });
+      });
+    }
+  });
+}
+
 // Reset app state and UI
 function resetApp() {
   try {
@@ -468,10 +533,12 @@ function resetApp() {
       routeLayer = null;
     }
     if (waterLayer) { waterLayer.clearLayers(); }
+    if (coffeeLayer) { coffeeLayer.clearLayers(); }
     // Reset state
     currentRouteGeoJSON = null;
     originalGpxText = '';
     foundWaterPoints = [];
+    foundCoffeePoints = [];
     downloadBtn.disabled = true;
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
@@ -567,7 +634,7 @@ function download(filename, text) {
 }
 
 // Import adaptive OSM utilities
-import { fetchOSMWaterPointsAdaptive } from './osmApi.js';
+import { fetchOSMWaterPointsAdaptive, fetchOverpassCoffeePoints } from './osmApi.js';
 
 async function handleGpx(file) {
   setError('');
@@ -638,15 +705,24 @@ if (radiusSelect) {
   radiusSelect.addEventListener('change', () => {
     const val = Number(radiusSelect.value);
     selectedRadiusMeters = Number.isFinite(val) ? val : selectedRadiusMeters;
-    if (!routeLayer || !foundWaterPoints.length) return;
+    if (!routeLayer) return;
     setStatus(`Updating results for ${selectedRadiusMeters} m …`);
     showLoading(true);
     try {
       const routeGeo = routeLayer.toGeoJSON();
       const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
-      const near = filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters);
-      renderWaterMarkers(near, true);
-      setStatus(`Found ${near.length} near-route water points (${foundWaterPoints.length} total).`);
+      let msgs = [];
+      if (foundWaterPoints.length) {
+        const nearW = filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters);
+        renderWaterMarkers(nearW, true);
+        msgs.push(`water ${nearW.length}/${foundWaterPoints.length}`);
+      }
+      if (foundCoffeePoints.length) {
+        const nearC = filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters);
+        renderCoffeeMarkers(nearC, true);
+        msgs.push(`coffee ${nearC.length}/${foundCoffeePoints.length}`);
+      }
+      if (msgs.length) setStatus(`Updated results for ${selectedRadiusMeters} m — ${msgs.join(', ')}`);
     } catch (e) {
       console.error(e);
       setError(e.message || String(e));
@@ -661,6 +737,32 @@ if (navNewBtn) {
   navNewBtn.addEventListener('click', (e) => {
     e.preventDefault();
     resetApp();
+  });
+}
+
+if (navCoffeeBtn) {
+  navCoffeeBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      setError('');
+      if (!routeLayer) { setError('Please load a GPX route first.'); return; }
+      const routeGeo = routeLayer.toGeoJSON();
+      const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
+      const bbox = computeBBoxFromGeoJSON(routeFC);
+      setStatus('Querying Overpass for coffee …');
+      showLoading(true);
+      const results = await fetchOverpassCoffeePoints(bbox, 30000);
+      foundCoffeePoints = results || [];
+      const near = filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters);
+      renderCoffeeMarkers(near, true);
+      setStatus(`Found ${near.length} near-route coffee places (${foundCoffeePoints.length} total).`);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || String(err));
+      setStatus('');
+    } finally {
+      showLoading(false);
+    }
   });
 }
 
@@ -707,6 +809,15 @@ document.addEventListener('keydown', (e) => {
     if (downloadBtn && !downloadBtn.disabled) {
       e.preventDefault();
       downloadBtn.click();
+      return;
+    }
+  }
+
+  // 'C' triggers coffee search
+  if (!isTyping && (e.key === 'C' || e.key === 'c')) {
+    if (navCoffeeBtn) {
+      e.preventDefault();
+      navCoffeeBtn.click();
       return;
     }
   }
