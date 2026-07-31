@@ -85,7 +85,6 @@ app.use(helmet({
       scriptSrc: [
         "'self'",
         (_req, res) => `'nonce-${res.locals.cspNonce}'`,
-        'https://cdn.tailwindcss.com',
         'https://cdn.jsdelivr.net',
         'https://unpkg.com'
       ],
@@ -181,6 +180,11 @@ app.get('/styles.css', (req, res) => {
   res.sendFile(path.join(__dirname, '../styles.css'));
 });
 
+// serve the Tailwind bundle built by `npm run build:css`
+app.get('/tailwind.css', (req, res) => {
+  res.sendFile(path.join(__dirname, '../tailwind.css'));
+});
+
 // serve test.html from ../tests/test.html
 app.get('/test.html', (req, res) => {
   res.sendFile(path.join(__dirname, '../tests/test.html'));
@@ -189,6 +193,11 @@ app.get('/test.html', (req, res) => {
 // serve osmApi.js from ../osmApi.js
 app.get('/osmApi.js', (req, res) => {
   res.sendFile(path.join(__dirname, '../osmApi.js'));
+});
+
+// serve fitToGeoJSON.js from ../fitToGeoJSON.js (imported by app.js)
+app.get('/fitToGeoJSON.js', (req, res) => {
+  res.sendFile(path.join(__dirname, '../fitToGeoJSON.js'));
 });
 
 // Basic auth middleware for admin endpoints

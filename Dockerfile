@@ -21,12 +21,15 @@ FROM base AS build
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y build-essential node-gyp pkg-config python-is-python3
 
-# Install node modules
+# Install node modules. NODE_ENV=production would skip the Tailwind CLI.
 COPY package-lock.json package.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 # Copy application code
 COPY . .
+
+# Build the stylesheet, then drop the build-only dependencies from the image
+RUN npm run build:css && npm prune --omit=dev
 
 
 # Final stage for app image
