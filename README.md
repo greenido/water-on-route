@@ -31,11 +31,14 @@ npm start
 # Open http://localhost:3000
 ```
 
-Admin (basic auth) credentials defaults:
+Configure admin credentials (passwords must be at least 16 characters):
 
 ```bash
-ADMIN_USER=your-user ADMIN_PASS='your-password' npm start
+ADMIN_USER=your-user ADMIN_PASS='replace-with-a-long-random-password' npm start
 ```
+
+Admin endpoints are disabled when credentials are absent in development, and
+the server refuses to start without them in production.
 
 This uses the default upstreams in `server/index.js`:
 
@@ -111,7 +114,7 @@ water-on-route/
 
 ### Prerequisites
 
-- Node.js 18+ (or a runtime compatible with `undici` and ESM in browsers)
+- Node.js 20+
 - Docker (if you want a local Overpass and tile server)
 
 ### Install and start
@@ -133,6 +136,8 @@ PORT=3000 \
 OVERPASS_TIMEOUT_MS=60000 \
 TILE_TIMEOUT_MS=20000 \
 TILE_USER_AGENT="water-on-route/1.0 (+local-proxy)" \
+ADMIN_USER=your-user \
+ADMIN_PASS="replace-with-a-long-random-password" \
 npm start
 ```
 
@@ -142,6 +147,15 @@ If you leave variables unset, sane defaults will be used:
 - `TILE_URL_TEMPLATE`: `https://tile.openstreetmap.org/{z}/{x}/{y}.png`
 - `PORT`: `3000`
 - `ROUTES_DB_PATH`: path to SQLite file (default `/data/routes.sqlite3` if available)
+- `TRUST_PROXY_HOPS`: trusted reverse-proxy hop count (Fly.io uses `1`)
+- `UPLOAD_RATE_LIMIT`: route uploads per client per 15 minutes (default `20`)
+- `PROXY_RATE_LIMIT`: Overpass requests per client per 15 minutes (default `120`)
+- `TILE_RATE_LIMIT`: tile requests per client per 15 minutes (default `600`)
+- `ADMIN_RATE_LIMIT`: admin requests per client per 15 minutes (default `60`)
+- `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
+
+Copy `.env.example` to `.env` for the complete configuration template. Never
+commit `.env` or real credentials.
 
 The frontend is preconfigured in `index.html` to call the local proxy:
 
@@ -189,11 +203,23 @@ The Express server exposes a few endpoints:
 
 - `POST /api/routes` – Save an uploaded route
   - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount }`
+  - Same-origin requests only; GPX content and metadata are validated
+  - Original GPX is limited to 8 MB and enriched GPX to 12 MB
   - Returns: `{ ok: true, id }`
 - `GET /api/routes` – List saved routes (protected)
   - Basic Auth required (see below)
   - Returns: `{ ok: true, routes: [...] }`
 - `GET /admin` – Admin UI: sortable/filterable table of routes (protected)
+
+### Security controls
+
+- Helmet sets CSP, clickjacking, MIME-sniffing, referrer, and HTTPS headers.
+- Route uploads, upstream proxies, tiles, and admin endpoints are rate-limited.
+- Browser state-changing requests are restricted to the same origin.
+- Admin credentials use timing-safe comparisons and are mandatory in production.
+- Raw database download is disabled unless `ENABLE_DB_DOWNLOAD=true`.
+- Upstream response sizes and tile coordinate ranges are bounded.
+- Third-party browser assets are pinned with Subresource Integrity hashes.
 
 ---
 
@@ -269,7 +295,8 @@ Modern Chromium, Firefox, and Safari. The app relies on ES modules and the Fetch
 ## Scripts
 
 - `npm start` – Start the Express proxy and serve the app on `http://localhost:3000`
-- `npm run dev` – Start with `nodemon` for automatic restarts on file changes
+- `npm run dev` – Start with Node's built-in watch mode
+- `npm test` – Run the security validation tests
 
 ---
 

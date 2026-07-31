@@ -2,4 +2,8 @@ routes/
 node_modules/
 old-stuff/
 .env
+.env.local
+.env.*.local
+*.key
+*.pem
 /data

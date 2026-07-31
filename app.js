@@ -409,14 +409,26 @@ async function renderWaterMarkers(points, animate = false) {
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
-    const distLine = Number.isFinite(p._distanceM)
-      ? `<br><span style="opacity:.85">${Math.round(p._distanceM)} m from route</span>`
-      : '';
+    const popup = document.createElement('div');
+    const title = document.createElement('b');
+    title.textContent = name;
+    popup.appendChild(title);
+    const subtypeLine = document.createElement('div');
+    subtypeLine.textContent = subtype;
+    popup.appendChild(subtypeLine);
+    if (Number.isFinite(p._distanceM)) {
+      const distanceLine = document.createElement('div');
+      distanceLine.textContent = `${Math.round(p._distanceM)} m from route`;
+      popup.appendChild(distanceLine);
+    }
+    const mapsLink = document.createElement('a');
+    mapsLink.href = `https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}`;
+    mapsLink.target = '_blank';
+    mapsLink.rel = 'noopener';
+    mapsLink.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    popup.appendChild(mapsLink);
     const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
-      .bindPopup(
-        `<b>${name}</b><br><span style="opacity:.9">${subtype}</span>${distLine}` +
-        `<br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`
-      )
+      .bindPopup(popup)
       .addTo(waterLayer);
     if (animate) {
       marker.on('add', () => {
@@ -510,24 +522,57 @@ async function renderCoffeeMarkers(points, animate = false) {
     const brand = tags['brand'];
     const cuisine = tags['cuisine'];
 
-    const details = [
-      fullAddress ? `<div>${fullAddress}</div>` : '',
-      hours ? `<div>Hours: ${hours}</div>` : '',
-      phone ? `<div>Phone: <a href="tel:${phone}">${phone}</a></div>` : '',
-      website ? `<div><a href="${website}" target="_blank" rel="noopener">Website</a></div>` : '',
-      operator ? `<div>Operator: ${operator}</div>` : '',
-      brand ? `<div>Brand: ${brand}</div>` : '',
-      cuisine ? `<div>Cuisine: ${cuisine}</div>` : '',
-    ].filter(Boolean).join('');
-
     const mapsUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${lat.toFixed(5)},${lon.toFixed(5)},17z`;
+    const popup = document.createElement('div');
+    const title = document.createElement('b');
+    title.textContent = name;
+    popup.appendChild(title);
+
+    const addDetail = (label, value) => {
+      if (!value) return;
+      const line = document.createElement('div');
+      line.textContent = label ? `${label}: ${value}` : String(value);
+      popup.appendChild(line);
+    };
+    addDetail('', fullAddress);
+    addDetail('Hours', hours);
+    if (phone && /^[+0-9().\s-]{3,30}$/.test(phone)) {
+      const phoneLine = document.createElement('div');
+      phoneLine.append('Phone: ');
+      const phoneLink = document.createElement('a');
+      phoneLink.href = `tel:${phone}`;
+      phoneLink.textContent = phone;
+      phoneLine.appendChild(phoneLink);
+      popup.appendChild(phoneLine);
+    }
+    if (website) {
+      try {
+        const candidate = /^[a-z][a-z0-9+.-]*:/i.test(website) ? website : `https://${website}`;
+        const websiteUrl = new URL(candidate);
+        if (websiteUrl.protocol === 'http:' || websiteUrl.protocol === 'https:') {
+          const websiteLine = document.createElement('div');
+          const websiteLink = document.createElement('a');
+          websiteLink.href = websiteUrl.href;
+          websiteLink.target = '_blank';
+          websiteLink.rel = 'noopener';
+          websiteLink.textContent = 'Website';
+          websiteLine.appendChild(websiteLink);
+          popup.appendChild(websiteLine);
+        }
+      } catch (_) {}
+    }
+    addDetail('Operator', operator);
+    addDetail('Brand', brand);
+    addDetail('Cuisine', cuisine);
+    const mapsLink = document.createElement('a');
+    mapsLink.href = mapsUrl;
+    mapsLink.target = '_blank';
+    mapsLink.rel = 'noopener';
+    mapsLink.textContent = 'Open in Google Maps';
+    popup.appendChild(mapsLink);
 
     const marker = L.marker([lat, lon], { title: name, icon: baseCoffeeIcon() })
-      .bindPopup(
-        `<b>${name}</b>` +
-        (details ? `<br>${details}` : '') +
-        `<br><a href="${mapsUrl}" target="_blank" rel="noopener">Open in Google Maps</a>`
-      )
+      .bindPopup(popup)
       .addTo(coffeeLayer);
     if (animate) {
       marker.on('add', () => {
@@ -616,6 +661,8 @@ function routeFileKind(file) {
   return null;
 }
 
+const MAX_ROUTE_FILE_BYTES = 8 * 1024 * 1024;
+
 async function parseGpxFile(file) {
   const text = await file.text();
   originalGpxText = text;
@@ -641,6 +688,9 @@ async function parseFitFile(file) {
 }
 
 async function parseRouteFile(file) {
+  if (file?.size > MAX_ROUTE_FILE_BYTES) {
+    throw new Error('File is too large. Please upload a .gpx or .fit file up to 8 MB.');
+  }
   const kind = routeFileKind(file);
   if (kind === 'fit') return parseFitFile(file);
   if (kind === 'gpx') return parseGpxFile(file);

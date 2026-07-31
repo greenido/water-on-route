@@ -34,6 +34,10 @@ FROM base
 # Copy built application
 COPY --from=build /app /app
 
+# Keep the application and mounted data path writable without root privileges.
+RUN mkdir -p /app/data /data && chown -R node:node /app /data
+
 # Start the server by default, this can be overwritten at runtime
+USER node
 EXPOSE 3000
 CMD [ "npm", "run", "start" ]

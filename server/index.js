@@ -29,24 +29,97 @@ catch (e) {
 }
 
 const express = require('express');
-const cors = require('cors');
 const { fetch } = require('undici');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
 const { initDatabase, insertRoute, listRoutes, getRouteById, deleteRouteById, DB_PATH } = require('./db');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const {
+  safeEqual,
+  validateRoutePayload,
+  validateTileCoordinates,
+  isAllowedOrigin
+} = require('./security');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // Configurable upstreams
 const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 const TILE_URL_TEMPLATE = process.env.TILE_URL_TEMPLATE || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-app.use(cors());
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: '5mb' }));
+if (process.env.TRUST_PROXY_HOPS) {
+  app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
+} else if (process.env.FLY_APP_NAME || process.env.FLY_MACHINE) {
+  app.set('trust proxy', 1);
+}
+
+app.use((_req, res, next) => {
+  res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+  next();
+});
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: [
+        "'self'",
+        (_req, res) => `'nonce-${res.locals.cspNonce}'`,
+        'https://cdn.tailwindcss.com',
+        'https://cdn.jsdelivr.net',
+        'https://unpkg.com'
+      ],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net', 'https://unpkg.com'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      upgradeInsecureRequests: IS_PRODUCTION ? [] : null
+    }
+  },
+  crossOriginEmbedderPolicy: false,
+  strictTransportSecurity: IS_PRODUCTION
+}));
+app.use(express.urlencoded({ extended: false, limit: '128kb' }));
+app.use(express.json({ limit: '24mb' }));
+
+const limiterDefaults = {
+  windowMs: 15 * 60 * 1000,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false
+};
+const uploadLimiter = rateLimit({
+  ...limiterDefaults,
+  limit: Number(process.env.UPLOAD_RATE_LIMIT || 20),
+  message: { error: 'Too many route uploads; try again later' }
+});
+const proxyLimiter = rateLimit({
+  ...limiterDefaults,
+  limit: Number(process.env.PROXY_RATE_LIMIT || 120),
+  message: 'Proxy rate limit exceeded'
+});
+const tileLimiter = rateLimit({
+  ...limiterDefaults,
+  limit: Number(process.env.TILE_RATE_LIMIT || 600),
+  message: 'Tile rate limit exceeded'
+});
+const adminLimiter = rateLimit({
+  ...limiterDefaults,
+  limit: Number(process.env.ADMIN_RATE_LIMIT || 60),
+  message: 'Admin rate limit exceeded'
+});
+
+function requireSameOrigin(req, res, next) {
+  if (!isAllowedOrigin(req.get('origin'), req.get('host'))) {
+    return res.status(403).json({ error: 'Cross-origin request denied' });
+  }
+  return next();
+}
 
 // serve favicon assets
 app.get('/favicon.svg', (req, res) => {
@@ -64,6 +137,15 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // serve index.html from ../index.html
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../index.html'));
+});
+
+app.get('/config.js', (_req, res) => {
+  res.type('application/javascript');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(`window.WOR_CONFIG = Object.freeze({
+    overpassUrl: '/api/overpass',
+    tileUrl: '/tiles/{z}/{x}/{y}.png'
+  });`);
 });
 
 // serve app.js from ../app.js
@@ -88,6 +170,11 @@ app.get('/osmApi.js', (req, res) => {
 
 // Basic auth middleware for admin endpoints
 function requireBasicAuth(req, res, next) {
+  const expectedUser = process.env.ADMIN_USER;
+  const expectedPass = process.env.ADMIN_PASS;
+  if (!expectedUser || !expectedPass) {
+    return res.status(503).send('Admin access is not configured');
+  }
   const header = req.headers['authorization'] || '';
   if (!header.startsWith('Basic ')) {
     res.setHeader('WWW-Authenticate', 'Basic realm="Admin"');
@@ -95,20 +182,26 @@ function requireBasicAuth(req, res, next) {
   }
   const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
   const idx = decoded.indexOf(':');
+  if (idx < 0) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Admin"');
+    return res.status(401).send('Invalid credentials');
+  }
   const user = decoded.slice(0, idx);
   const pass = decoded.slice(idx + 1);
-  const expectedUser = process.env.ADMIN_USER;
-  const expectedPass = process.env.ADMIN_PASS;
-  if (user === expectedUser && pass === expectedPass) return next();
+  if (safeEqual(user, expectedUser) && safeEqual(pass, expectedPass)) return next();
   res.setHeader('WWW-Authenticate', 'Basic realm="Admin"');
   return res.status(401).send('Invalid credentials');
 }
 
 // API: Save a route (raw GPX plus summary)
 // body: { filename, gpxText, bbox, routeKm, waypointsCount }
-app.post('/api/routes', async (req, res) => {
+app.post('/api/routes', uploadLimiter, requireSameOrigin, async (req, res) => {
   try {
-    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = req.body || {};
+    const validation = validateRoutePayload(req.body);
+    if (!validation.ok) {
+      return res.status(400).json({ error: validation.error });
+    }
+    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = validation.value;
     console.log('[POST /api/routes] Incoming request', {
       filename,
       bbox,
@@ -117,35 +210,31 @@ app.post('/api/routes', async (req, res) => {
       hasWaterPoints: !!waterPoints,
       hasEnrichedGpx: !!enrichedGpxText
     });
-    if (typeof gpxText !== 'string' || gpxText.length === 0) {
-      console.warn('[POST /api/routes] Missing gpxText');
-      return res.status(400).json({ error: 'gpxText is required' });
-    }
     const fileSize = Buffer.byteLength(gpxText, 'utf8');
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || req.ip || null;
+    const clientIp = req.ip || req.socket?.remoteAddress || null;
     console.log('[POST /api/routes] Calculated fileSize and clientIp', { fileSize, clientIp });
     const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
     console.log('[POST /api/routes] Route inserted', { id: result.id });
     return res.json({ ok: true, id: result.id });
   } catch (e) {
     console.error('[POST /api/routes] Error:', e);
-    return res.status(500).json({ error: e.message || 'Failed to save route' });
+    return res.status(500).json({ error: 'Failed to save route' });
   }
 });
 
 // API: List routes (protected)
-app.get('/api/routes', requireBasicAuth, async (_req, res) => {
+app.get('/api/routes', adminLimiter, requireBasicAuth, async (_req, res) => {
   try {
     const rows = await listRoutes();
     return res.json({ ok: true, routes: rows });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: e.message || 'Failed to list routes' });
+    return res.status(500).json({ error: 'Failed to list routes' });
   }
 });
 
 // API: Delete route (protected)
-app.delete('/api/routes/:id', requireBasicAuth, async (req, res) => {
+app.delete('/api/routes/:id', adminLimiter, requireSameOrigin, requireBasicAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -156,7 +245,7 @@ app.delete('/api/routes/:id', requireBasicAuth, async (req, res) => {
     return res.json({ ok: true, deleted: result.deletedCount });
   } catch (e) {
     console.error('[DELETE /api/routes/:id] error', e);
-    return res.status(500).json({ error: e.message || 'Failed to delete route' });
+    return res.status(500).json({ error: 'Failed to delete route' });
   }
 });
 
@@ -187,9 +276,9 @@ function cacheSet(ip, value) {
   GEOIP_CACHE.set(ip, { v: value, t: Date.now() });
 }
 
-app.get('/api/geoip/:ip', requireBasicAuth, async (req, res) => {
+app.get('/api/geoip/:ip', adminLimiter, requireBasicAuth, async (req, res) => {
   const ip = String(req.params.ip || '').trim();
-  if (!ip) return res.status(400).json({ error: 'ip required' });
+  if (!net.isIP(ip)) return res.status(400).json({ error: 'valid IP required' });
   if (isPrivateIp(ip)) return res.json({ ok: true, location: '' });
   const cached = cacheGet(ip);
   if (cached !== null && cached !== undefined) {
@@ -222,7 +311,7 @@ app.get('/api/geoip/:ip', requireBasicAuth, async (req, res) => {
 });
 
 // Download endpoints (protected)
-app.get('/api/routes/:id/original.gpx', requireBasicAuth, async (req, res) => {
+app.get('/api/routes/:id/original.gpx', adminLimiter, requireBasicAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).send('Invalid id');
@@ -238,7 +327,7 @@ app.get('/api/routes/:id/original.gpx', requireBasicAuth, async (req, res) => {
   }
 });
 
-app.get('/api/routes/:id/enriched.gpx', requireBasicAuth, async (req, res) => {
+app.get('/api/routes/:id/enriched.gpx', adminLimiter, requireBasicAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).send('Invalid id');
@@ -256,8 +345,11 @@ app.get('/api/routes/:id/enriched.gpx', requireBasicAuth, async (req, res) => {
 });
 
 // Admin utilities (protected)
-app.get('/api/admin/db.sqlite3', requireBasicAuth, async (_req, res) => {
+app.get('/api/admin/db.sqlite3', adminLimiter, requireBasicAuth, async (_req, res) => {
   try {
+    if (process.env.ENABLE_DB_DOWNLOAD !== 'true') {
+      return res.status(404).send('Not found');
+    }
     if (!DB_PATH || !fs.existsSync(DB_PATH)) {
       return res.status(404).send('DB file not found');
     }
@@ -276,7 +368,7 @@ app.get('/api/admin/db.sqlite3', requireBasicAuth, async (_req, res) => {
   }
 });
 
-app.get('/api/routes/all.zip', requireBasicAuth, async (_req, res) => {
+app.get('/api/routes/all.zip', adminLimiter, requireBasicAuth, async (_req, res) => {
   try {
     const routes = await listRoutes();
     const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
@@ -319,7 +411,11 @@ app.get('/api/routes/all.zip', requireBasicAuth, async (_req, res) => {
 });
 
 // Admin page (protected)
-app.get('/admin', requireBasicAuth, (req, res) => {
+app.get('/admin', adminLimiter, requireBasicAuth, (req, res) => {
+  const nonce = res.locals.cspNonce;
+  const dbDownloadLink = process.env.ENABLE_DB_DOWNLOAD === 'true'
+    ? '<a href="/api/admin/db.sqlite3" class="px-3 py-2 rounded-lg bg-emerald-400 text-slate-900 font-medium hover:bg-emerald-300 transition text-sm inline-flex items-center gap-2">Download DB</a>'
+    : '';
   res.type('html');
   res.send(`<!doctype html>
 <html>
@@ -327,16 +423,16 @@ app.get('/admin', requireBasicAuth, (req, res) => {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Routes Admin</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/style.css">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>body{background:#0f172a;color:#e2e8f0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol} .wrap{max-width:1100px;margin:24px auto;padding:0 16px} .card{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:16px} h1{font-size:18px;margin:0 0 12px} .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch} #routesTable{width:100%} #routesTable td.route-cell{max-width:340px;white-space:normal;word-break:break-word;overflow-wrap:anywhere} @media (max-width:720px){ #routesTable td.route-cell{max-width:220px} }</style>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3/dist/style.css" integrity="sha384-xnK68E/OAsSGcbvbeWEOyhjix2K7rBxt8Eytj/Ow9zuPG7WwFGGqMPQ8SbexlsL0" crossorigin="anonymous">
+    <script nonce="${nonce}" src="https://cdn.tailwindcss.com" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
+    <style nonce="${nonce}">body{background:#0f172a;color:#e2e8f0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji, Segoe UI Symbol} .wrap{max-width:1100px;margin:24px auto;padding:0 16px} .card{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:16px} h1{font-size:18px;margin:0 0 12px} .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch} #routesTable{width:100%} #routesTable td.route-cell{max-width:340px;white-space:normal;word-break:break-word;overflow-wrap:anywhere} @media (max-width:720px){ #routesTable td.route-cell{max-width:220px} }</style>
   </head>
   <body class="bg-slate-950 text-slate-100">
     <div class="wrap">
       <h1 class="m-0 text-lg tracking-wide font-semibold">Saved Routes</h1>
       <div class="card mb-3 flex gap-2 flex-wrap">
-        <a href="/api/routes/all.zip" class="px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium hover:bg-sky-300 transition text-sm inline-flex items-center gap-2 shadow-sm">⬇️ <span>Download all</span></a>
-        <a href="/api/admin/db.sqlite3" class="px-3 py-2 rounded-lg bg-emerald-400 text-slate-900 font-medium hover:bg-emerald-300 transition text-sm inline-flex items-center gap-2 shadow-sm">🗄️ <span>Download DB</span></a>
+        <a href="/api/routes/all.zip" class="px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium hover:bg-sky-300 transition text-sm inline-flex items-center gap-2">Download all</a>
+        ${dbDownloadLink}
       </div>
       <div class="card">
         <div class="table-wrap">
@@ -358,10 +454,9 @@ app.get('/admin', requireBasicAuth, (req, res) => {
         </table>
         </div>
       </div>
-      <p style="opacity:.7;margin-top:8px">DB path: ${DB_PATH}</p>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3" defer></script>
-    <script>
+    <script nonce="${nonce}" src="https://cdn.jsdelivr.net/npm/simple-datatables@9.0.3" integrity="sha384-IcefnZaMCtDiSE2p4HhAg75sODUAq5J6cACfphqpslFg2cUyu+WPD+942g1NfZqr" crossorigin="anonymous" defer></script>
+    <script nonce="${nonce}">
       document.addEventListener('DOMContentLoaded', async () => {
         try {
           const resp = await fetch('/api/routes', { headers: { 'Accept': 'application/json' } });
@@ -386,25 +481,44 @@ app.get('/admin', requireBasicAuth, (req, res) => {
             }
           }
 
+          function appendTextCell(row, value, className) {
+            const cell = document.createElement('td');
+            if (className) cell.className = className;
+            cell.textContent = value == null ? '' : String(value);
+            row.appendChild(cell);
+            return cell;
+          }
+
           routes.forEach(r => {
             const tr = document.createElement('tr');
             const kb = r.fileSize ? Math.round(r.fileSize / 1024) : '';
-            const safeName = (r.filename || '').toString();
-            const dlOriginal = '<a href="/api/routes/' + r.id + '/original.gpx" target="_blank" rel="noopener">🏁 Original</a>';
-            const dlEnriched = r.hasEnriched ? (' | <a href="/api/routes/' + r.id + '/enriched.gpx" target="_blank" rel="noopener">💧 Enriched</a>') : '';
-            tr.innerHTML = 
-              '<td>' + r.id + '</td>' +
-              '<td class="route-cell">' + safeName + '</td>' +
-              '<td>' + kb + '</td>' +
-              '<td>' + (r.routeKm ?? '') + '</td>' +
-              '<td>' + (r.waypointsCount ?? '') + '</td>' +
-              '<td>' + (r.uploadedAt || '') + '</td>' +
-              '<td class="route-cell">' + (r.clientIp || '') + '</td>' +
-              '<td class="location-cell">' + (r.clientIp ? '…' : '') + '</td>' +
-              '<td>' + dlOriginal + dlEnriched + '</td>';
+            appendTextCell(tr, r.id);
+            appendTextCell(tr, r.filename, 'route-cell');
+            appendTextCell(tr, kb);
+            appendTextCell(tr, r.routeKm);
+            appendTextCell(tr, r.waypointsCount);
+            appendTextCell(tr, r.uploadedAt);
+            appendTextCell(tr, r.clientIp, 'route-cell');
+            const locTd = appendTextCell(tr, r.clientIp ? '…' : '', 'location-cell');
+            const downloads = document.createElement('td');
+            const original = document.createElement('a');
+            original.href = '/api/routes/' + encodeURIComponent(r.id) + '/original.gpx';
+            original.target = '_blank';
+            original.rel = 'noopener';
+            original.textContent = 'Original';
+            downloads.appendChild(original);
+            if (r.hasEnriched) {
+              downloads.appendChild(document.createTextNode(' | '));
+              const enriched = document.createElement('a');
+              enriched.href = '/api/routes/' + encodeURIComponent(r.id) + '/enriched.gpx';
+              enriched.target = '_blank';
+              enriched.rel = 'noopener';
+              enriched.textContent = 'Enriched';
+              downloads.appendChild(enriched);
+            }
+            tr.appendChild(downloads);
             tbody.appendChild(tr);
 
-            const locTd = tr.querySelector('.location-cell');
             if (r.clientIp && locTd) {
               resolveLocation(r.clientIp).then(loc => {
                 locTd.textContent = loc || '';
@@ -421,7 +535,7 @@ app.get('/admin', requireBasicAuth, (req, res) => {
           theadRow.appendChild(th);
 
           const rows = table.querySelectorAll('tbody tr');
-          rows.forEach((row, idx) => {
+          rows.forEach((row) => {
             const idCell = row.children[0];
             const id = Number(idCell && idCell.textContent);
             const td = document.createElement('td');
@@ -459,7 +573,33 @@ app.get('/admin', requireBasicAuth, (req, res) => {
 //
 //
 // Overpass proxy: accepts form-urlencoded with `data` or JSON { query }
-app.post('/api/overpass', async (req, res) => {
+async function readUpstreamBody(response, maxBytes) {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error('Upstream response exceeds size limit');
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error('Upstream response exceeds size limit');
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
+}
+
+app.post('/api/overpass', proxyLimiter, requireSameOrigin, async (req, res) => {
   try {
     const controller = new AbortController();
     const timeoutMs = Number(process.env.OVERPASS_TIMEOUT_MS || 60000);
@@ -468,34 +608,46 @@ app.post('/api/overpass', async (req, res) => {
       let body;
       let headers;
       if (typeof req.body === 'object' && req.headers['content-type']?.includes('application/json')) {
-        const query = req.body.query || req.body.data;
-        body = 'data=' + encodeURIComponent(String(query || ''));
+        const query = String(req.body.query || req.body.data || '');
+        if (!query || Buffer.byteLength(query, 'utf8') > 64 * 1024) {
+          return res.status(400).send('Invalid Overpass query');
+        }
+        body = 'data=' + encodeURIComponent(query);
         headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
       } else {
         // urlencoded already parsed into req.body; rebuild search params
-        const query = req.body.data || req.body.query || '';
-        body = 'data=' + encodeURIComponent(String(query));
+        const query = String(req.body.data || req.body.query || '');
+        if (!query || Buffer.byteLength(query, 'utf8') > 64 * 1024) {
+          return res.status(400).send('Invalid Overpass query');
+        }
+        body = 'data=' + encodeURIComponent(query);
         headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
       }
       const upstreamResp = await fetch(OVERPASS_URL, { method: 'POST', headers, body, signal: controller.signal });
-      const text = await upstreamResp.text();
+      const responseBody = await readUpstreamBody(
+        upstreamResp,
+        Number(process.env.OVERPASS_MAX_RESPONSE_BYTES || 8 * 1024 * 1024)
+      );
       res.status(upstreamResp.status);
       // Pass through content type if available
       const ct = upstreamResp.headers.get('content-type') || 'text/xml; charset=utf-8';
       res.setHeader('Content-Type', ct);
-      return res.send(text);
+      return res.send(responseBody);
     } finally {
       clearTimeout(timer);
     }
   } catch (err) {
     const status = err.name === 'AbortError' ? 504 : 502;
-    return res.status(status).send((err && err.message) || 'Proxy error');
+    console.error('[POST /api/overpass] error', err);
+    return res.status(status).send('Proxy error');
   }
 });
 
 // Simple tile proxy
-app.get('/tiles/:z/:x/:y.png', async (req, res) => {
-  const { z, x, y } = req.params;
+app.get('/tiles/:z/:x/:y.png', tileLimiter, async (req, res) => {
+  const coordinates = validateTileCoordinates(req.params.z, req.params.x, req.params.y);
+  if (!coordinates) return res.status(400).send('Invalid tile coordinates');
+  const { z, x, y } = coordinates;
   const upstream = TILE_URL_TEMPLATE.replace('{z}', z).replace('{x}', x).replace('{y}', y);
   try {
     const controller = new AbortController();
@@ -513,12 +665,12 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
       res.setHeader('Content-Type', upstreamResp.headers.get('content-type') || 'image/png');
       res.setHeader('Cache-Control', 'public, max-age=3600');
       if (!upstreamResp.ok) {
-        const txt = await upstreamResp.text();
-        return res.send(txt);
+        return res.send(await readUpstreamBody(upstreamResp, 64 * 1024));
       }
-      // Send image as buffer (undici provides Web ReadableStream, not Node's)
-      const arrayBuf = await upstreamResp.arrayBuffer();
-      const buf = Buffer.from(arrayBuf);
+      const buf = await readUpstreamBody(
+        upstreamResp,
+        Number(process.env.TILE_MAX_RESPONSE_BYTES || 2 * 1024 * 1024)
+      );
       res.setHeader('Content-Length', String(buf.length));
       return res.end(buf);
     } finally {
@@ -529,6 +681,33 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     return res.status(status).send('Tile proxy error');
   }
 });
+
+app.use((err, _req, res, next) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({ error: 'Request body exceeds the 24 MB limit' });
+  }
+  if (err) {
+    console.error('[express] unhandled request error', err);
+    return res.status(400).json({ error: 'Invalid request' });
+  }
+  return next();
+});
+
+function validateStartupConfiguration() {
+  const adminUser = process.env.ADMIN_USER;
+  const adminPass = process.env.ADMIN_PASS;
+  if (IS_PRODUCTION && (!adminUser || !adminPass)) {
+    throw new Error('ADMIN_USER and ADMIN_PASS are required in production');
+  }
+  if ((adminUser && !adminPass) || (!adminUser && adminPass)) {
+    throw new Error('ADMIN_USER and ADMIN_PASS must be configured together');
+  }
+  if (adminUser && (adminUser.length < 4 || adminPass.length < 16)) {
+    throw new Error('ADMIN_USER must be at least 4 characters and ADMIN_PASS at least 16 characters');
+  }
+}
+
+validateStartupConfiguration();
 
 initDatabase()
   .then(() => {

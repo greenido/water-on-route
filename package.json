@@ -28,17 +28,16 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "nodemon server/index.js"
+    "dev": "node --watch server/index.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "archiver": "^7.0.1",
-    "cors": "^2.8.5",
+    "archiver": "^8.0.0",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "sqlite3": "^5.1.7",
-    "undici": "^6.19.8"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.7"
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.1",
+    "helmet": "^8.3.0",
+    "sqlite3": "^6.0.1",
+    "undici": "^8.9.0"
   }
 }
