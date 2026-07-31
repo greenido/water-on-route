@@ -22,7 +22,7 @@
     "osm"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "private": true,
   "type": "commonjs",

@@ -1,9 +1,9 @@
-# fly.toml app configuration file generated for water-on-route on 2025-09-16T19:19:27Z
+# fly.toml app configuration file generated for water-2-route
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'water-on-route'
+app = 'water-2-route'
 primary_region = 'sjc'
 
 [build]
@@ -26,4 +26,3 @@ primary_region = 'sjc'
   source = "wor_data"
   destination = "/data"
   processes = ['app']
-

@@ -1,6 +1,10 @@
 /.git
 /node_modules
+/data
+/old-stuff
 .dockerignore
 .env
+.env.*
+.DS_Store
 Dockerfile
 fly.toml

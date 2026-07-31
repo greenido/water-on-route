@@ -7,3 +7,4 @@ old-stuff/
 *.key
 *.pem
 /data
+.env.fly.secrets
