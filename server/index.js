@@ -76,9 +76,9 @@ app.get('/styles.css', (req, res) => {
   res.sendFile(path.join(__dirname, '../styles.css'));
 });
 
-// serve test.html from ../test.html
+// serve test.html from ../tests/test.html
 app.get('/test.html', (req, res) => {
-  res.sendFile(path.join(__dirname, '../test.html'));
+  res.sendFile(path.join(__dirname, '../tests/test.html'));
 });
 
 // serve osmApi.js from ../osmApi.js

@@ -18,7 +18,13 @@
  *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download
  */
 
-import { fetchOSMWaterPointsAdaptive, fetchOverpassCoffeePoints } from './osmApi.js';
+import {
+  fetchOSMWaterPointsAdaptive,
+  fetchOSMCoffeePointsAdaptive,
+  waterSubtypeLabel,
+  rankCoffeePoints,
+  sortPointsByDistance,
+} from './osmApi.js';
 import { parseFitToGeoJSON } from './fitToGeoJSON.js';
 
 // Basic UI elements
@@ -338,7 +344,9 @@ function filterPointsNearRoute(geojsonRoute, points, maxMeters) {
       if (d < min) min = d;
       if (min <= maxMeters) break;
     }
-    if (min <= maxMeters) result.push(p);
+    if (min <= maxMeters) {
+      result.push({ ...p, _distanceM: min });
+    }
   }
   return result;
 }
@@ -397,11 +405,18 @@ async function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
   points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.description) || 'Water';
+    const subtype = waterSubtypeLabel(p.tags);
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    const distLine = Number.isFinite(p._distanceM)
+      ? `<br><span style="opacity:.85">${Math.round(p._distanceM)} m from route</span>`
+      : '';
     const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
-      .bindPopup(`<b>${name}</b><br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`)
+      .bindPopup(
+        `<b>${name}</b><br><span style="opacity:.9">${subtype}</span>${distLine}` +
+        `<br><a href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}" target="_blank" rel="noopener">${lat.toFixed(5)}, ${lon.toFixed(5)}</a>`
+      )
       .addTo(waterLayer);
     if (animate) {
       marker.on('add', () => {
@@ -641,7 +656,7 @@ function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters) {
       const lat = p.lat ?? p.center.lat;
       const lon = p.lon ?? p.center.lon;
       const name = p.tags?.name || p.tags?.description || 'Water';
-      const type = p._type || p.tags?.amenity || p.tags?.natural || p.tags?.man_made || 'water';
+      const type = waterSubtypeLabel(p.tags) || p._type || 'water';
       return {
         type: 'Feature',
         properties: { name, type },
@@ -685,7 +700,7 @@ async function handleRouteFile(file) {
       setStatus(`Querying ${backend} for water points … (${done})`);
     }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
     foundWaterPoints = results;
-    const near = filterPointsNearRoute(geojson, results, selectedRadiusMeters);
+    const near = sortPointsByDistance(filterPointsNearRoute(geojson, results, selectedRadiusMeters));
     renderWaterMarkers(near, true);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
@@ -745,12 +760,12 @@ if (radiusSelect) {
       const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
       let msgs = [];
       if (foundWaterPoints.length) {
-        const nearW = filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters);
+        const nearW = sortPointsByDistance(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters));
         renderWaterMarkers(nearW, true);
         msgs.push(`water ${nearW.length}/${foundWaterPoints.length}`);
       }
       if (foundCoffeePoints.length) {
-        const nearC = filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters);
+        const nearC = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters));
         renderCoffeeMarkers(nearC, true);
         msgs.push(`coffee ${nearC.length}/${foundCoffeePoints.length}`);
       }
@@ -783,9 +798,11 @@ if (navCoffeeBtn) {
       const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus('Querying Overpass for coffee …');
       showLoading(true);
-      const results = await fetchOverpassCoffeePoints(bbox, 30000);
+      const results = await fetchOSMCoffeePointsAdaptive(bbox, (done) => {
+        setStatus(`Querying Overpass for coffee … (${done})`);
+      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
       foundCoffeePoints = results || [];
-      const near = filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters);
+      const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters));
       renderCoffeeMarkers(near, true);
       setStatus(`Found ${near.length} near-route coffee places (${foundCoffeePoints.length} total).`);
     } catch (err) {

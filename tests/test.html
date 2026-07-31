@@ -16,7 +16,17 @@
     <h1>OSM API Tests</h1>
     <div id="out"></div>
     <script type="module">
-      import { fetchOSMWaterPointsAdaptive } from './osmApi.js';
+      import {
+        fetchOSMWaterPointsAdaptive,
+        fetchOSMCoffeePointsAdaptive,
+        parseOsmXmlForWater,
+        isPotableWaterTags,
+        isCoffeeTags,
+        waterSubtypeLabel,
+        dedupePointsByTypeId,
+        rankCoffeePoints,
+        coffeeQualityBoost,
+      } from './osmApi.js';
 
       const out = document.getElementById('out');
       function log(status, name, message) {
@@ -67,6 +77,100 @@
         await fetchOSMWaterPointsAdaptive(bbox, null, { fetchImpl: fakeFetch, minSpan: 0.01, initialBackoffMs: 10, maxBackoffMs: 40 });
         // We can't assert exact timing reliably, but we can assert at least multiple attempts were made
         log(calls >= 3, 'exponential backoff triggers on 429');
+      }
+
+      function testPotableWaterTags() {
+        const ok =
+          isPotableWaterTags({ amenity: 'drinking_water' }) &&
+          isPotableWaterTags({ natural: 'spring' }) &&
+          isPotableWaterTags({ man_made: 'water_tap' }) &&
+          isPotableWaterTags({ amenity: 'water_point' }) &&
+          isPotableWaterTags({ amenity: 'fountain', drinking_water: 'yes' }) &&
+          isPotableWaterTags({ amenity: 'fountain', drinking_water: 'compatible' }) &&
+          isPotableWaterTags({ man_made: 'water_well', drinking_water: 'yes' }) &&
+          isPotableWaterTags({ drinking_water: 'yes' }) &&
+          !isPotableWaterTags({ amenity: 'fountain' }) &&
+          !isPotableWaterTags({ amenity: 'fountain', drinking_water: 'no' }) &&
+          !isPotableWaterTags({ amenity: 'drinking_water', drinking_water: 'no' }) &&
+          !isPotableWaterTags({ man_made: 'water_well' });
+        log(ok, 'isPotableWaterTags accepts potable / rejects decorative');
+      }
+
+      function testParseWaterFountainXml() {
+        const xml = `<?xml version="1.0"?>
+          <osm version="0.6">
+            <node id="10" lat="1" lon="2">
+              <tag k="amenity" v="fountain"/>
+              <tag k="drinking_water" v="yes"/>
+              <tag k="name" v="Park Tap"/>
+            </node>
+            <node id="11" lat="1" lon="3">
+              <tag k="amenity" v="fountain"/>
+              <tag k="drinking_water" v="no"/>
+            </node>
+            <node id="12" lat="1" lon="4">
+              <tag k="amenity" v="fountain"/>
+            </node>
+          </osm>`;
+        const pts = parseOsmXmlForWater(xml);
+        const ok = pts.length === 1 && pts[0].id === 10 && waterSubtypeLabel(pts[0].tags) === 'fountain';
+        log(ok, 'parseOsmXmlForWater keeps potable fountain only', `got ${pts.length} pts`);
+      }
+
+      function testCoffeeTagsAndRank() {
+        const coffeeOk =
+          isCoffeeTags({ amenity: 'cafe' }) &&
+          isCoffeeTags({ shop: 'coffee' }) &&
+          isCoffeeTags({ amenity: 'restaurant', cuisine: 'coffee_shop' }) &&
+          isCoffeeTags({ amenity: 'restaurant', cuisine: 'espresso;pizza' }) &&
+          !isCoffeeTags({ amenity: 'bar' }) &&
+          !isCoffeeTags({ amenity: 'restaurant', cuisine: 'pizza' });
+
+        const ranked = rankCoffeePoints([
+          { id: 1, _distanceM: 50, tags: {} },
+          { id: 2, _distanceM: 80, tags: { name: 'Roast Lab', cuisine: 'coffee', opening_hours: 'Mo-Fr 08:00-17:00', website: 'https://example.com' } },
+          { id: 3, _distanceM: 40, tags: { name: 'Close Cafe' } },
+        ]);
+        // id2 boost=30+20+15+10=75, score=75-80=-5
+        // id3 boost=30, score=30-40=-10
+        // id1 boost=0, score=0-50=-50
+        const orderOk = ranked[0].id === 2 && ranked[1].id === 3 && ranked[2].id === 1;
+        const boostOk = coffeeQualityBoost(ranked[0]) === 75;
+        log(coffeeOk && orderOk && boostOk, 'coffee tags + rankCoffeePoints order');
+      }
+
+      function testDedupe() {
+        const pts = dedupePointsByTypeId([
+          { id: 1, _type: 'node', tags: { a: 1 } },
+          { id: 1, _type: 'node', tags: { a: 2 } },
+          { id: 1, _type: 'way', tags: { a: 3 } },
+        ]);
+        log(pts.length === 2 && pts[0].tags.a === 1 && pts[1]._type === 'way', 'dedupePointsByTypeId');
+      }
+
+      async function testCoffeeAdaptiveSplit() {
+        let calls = 0;
+        const fakeFetch = async () => {
+          calls++;
+          if (calls === 1) return new Response('Bad bbox', { status: 400 });
+          const body = `<?xml version="1.0"?>
+            <osm version="0.6">
+              <node id="5" lat="10" lon="10">
+                <tag k="amenity" v="cafe"/>
+                <tag k="name" v="Test Cafe"/>
+              </node>
+              <node id="6" lat="10" lon="11">
+                <tag k="amenity" v="bar"/>
+              </node>
+            </osm>`;
+          return new Response(body, { status: 200, headers: { 'Content-Type': 'text/xml' } });
+        };
+        const bbox = { minlat: 0, minlon: 0, maxlat: 1, maxlon: 1 };
+        const pts = await fetchOSMCoffeePointsAdaptive(bbox, null, {
+          fetchImpl: fakeFetch, minSpan: 0.1, initialBackoffMs: 0, maxBackoffMs: 0,
+        });
+        const ok = Array.isArray(pts) && pts.length === 1 && pts[0].tags.amenity === 'cafe';
+        log(ok, 'coffee adaptive split yields cafe only', `got ${JSON.stringify(pts)}`);
       }
 
       async function testFitToGeoJSON() {
@@ -126,6 +230,11 @@
       async function run() {
         try { await testAdaptiveSplitOn400(); } catch (e) { log(false, 'adaptive split handles 400', e.message); }
         try { await testBackoff429(); } catch (e) { log(false, 'exponential backoff triggers on 429', e.message); }
+        try { testPotableWaterTags(); } catch (e) { log(false, 'isPotableWaterTags', e.message); }
+        try { testParseWaterFountainXml(); } catch (e) { log(false, 'parseOsmXmlForWater fountain', e.message); }
+        try { testCoffeeTagsAndRank(); } catch (e) { log(false, 'coffee tags + rank', e.message); }
+        try { testDedupe(); } catch (e) { log(false, 'dedupe', e.message); }
+        try { await testCoffeeAdaptiveSplit(); } catch (e) { log(false, 'coffee adaptive', e.message); }
         try { await testFitToGeoJSON(); } catch (e) { log(false, 'FIT parsing helpers', e.message); }
       }
 
@@ -133,5 +242,3 @@
     </script>
   </body>
   </html>
-
-

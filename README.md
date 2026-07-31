@@ -9,8 +9,9 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 ## Features
 
 - Upload or drag-and-drop a `.gpx` or Garmin `.fit` file
-- Interactive map with your route and water markers
-- Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits
+- Interactive map with your route, water markers, and optional coffee markers
+- Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
+- Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits (water and coffee)
 - One-click download of an enriched `.gpx` including water waypoints
 - Local proxy for Overpass and tiles to avoid CORS and respect usage policies
 - Optional Docker stack to run Overpass and a local raster tile server
@@ -69,8 +70,9 @@ Notes:
 - Frontend (`index.html`, `app.js`, `osmApi.js`)
   - Renders a Leaflet map and your GPX route
   - Computes a bounding box for the route
-  - Queries Overpass for water features: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`
-  - Adaptively splits the bbox and retries on 400/429/504 responses
+  - Queries Overpass for potable water: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`, `amenity=water_point`, potable `amenity=fountain` / `man_made=water_well`, and `drinking_water=yes|compatible` (excludes `drinking_water=no`)
+  - Optional coffee search: `amenity=cafe`, `shop=coffee`, restaurants with coffee-related cuisine; ranked by corridor distance plus OSM signals (name/brand, cuisine, hours, website)
+  - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
 
 - Backend (`server/index.js`)
