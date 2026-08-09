@@ -30,7 +30,7 @@
     "build:css": "tailwindcss -i ./tailwind.input.css -o ./tailwind.css --minify",
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test \"tests/**/*.test.*js\""
   },
   "dependencies": {
     "archiver": "^8.0.0",

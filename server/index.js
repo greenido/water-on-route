@@ -170,35 +170,25 @@ app.get('/config.js', (_req, res) => {
   });`);
 });
 
-// serve app.js from ../app.js
-app.get('/app.js', (req, res) => {
-  res.sendFile(path.join(__dirname, '../app.js'));
-});
+// Client assets, served explicitly so nothing outside this list is reachable.
+// .mjs needs an explicit type: not every Express/mime version maps it.
+const STATIC_ASSETS = {
+  '/app.js': { file: '../app.js', type: 'text/javascript' },
+  '/geo.mjs': { file: '../geo.mjs', type: 'text/javascript' },
+  '/osmApi.mjs': { file: '../osmApi.mjs', type: 'text/javascript' },
+  '/fitToGeoJSON.mjs': { file: '../fitToGeoJSON.mjs', type: 'text/javascript' },
+  '/styles.css': { file: '../styles.css', type: 'text/css' },
+  // built by `npm run build:css`
+  '/tailwind.css': { file: '../tailwind.css', type: 'text/css' },
+  '/test.html': { file: '../tests/test.html', type: 'text/html' }
+};
 
-// serve styles.css from ../styles.css
-app.get('/styles.css', (req, res) => {
-  res.sendFile(path.join(__dirname, '../styles.css'));
-});
-
-// serve the Tailwind bundle built by `npm run build:css`
-app.get('/tailwind.css', (req, res) => {
-  res.sendFile(path.join(__dirname, '../tailwind.css'));
-});
-
-// serve test.html from ../tests/test.html
-app.get('/test.html', (req, res) => {
-  res.sendFile(path.join(__dirname, '../tests/test.html'));
-});
-
-// serve osmApi.js from ../osmApi.js
-app.get('/osmApi.js', (req, res) => {
-  res.sendFile(path.join(__dirname, '../osmApi.js'));
-});
-
-// serve fitToGeoJSON.js from ../fitToGeoJSON.js (imported by app.js)
-app.get('/fitToGeoJSON.js', (req, res) => {
-  res.sendFile(path.join(__dirname, '../fitToGeoJSON.js'));
-});
+for (const [route, { file, type }] of Object.entries(STATIC_ASSETS)) {
+  app.get(route, (_req, res) => {
+    res.type(type);
+    res.sendFile(path.join(__dirname, file));
+  });
+}
 
 // Basic auth middleware for admin endpoints
 function requireBasicAuth(req, res, next) {
