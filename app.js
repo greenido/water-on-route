@@ -34,6 +34,7 @@ import {
   computeBBoxFromGeoJSON,
   computeRouteLengthKm,
   filterPointsNearRoute,
+  buildRouteIndex,
 } from './geo.mjs';
 
 // Basic UI elements
@@ -207,6 +208,8 @@ let layersControl = null;
 // Guards against re-uploading the same route on every radius change.
 let currentRouteFilename = 'route.gpx';
 let savedRouteForFile = false;
+// Route projected once per file; radius changes and exports reuse it.
+let currentRouteIndex = null;
 
 // Layers control: allow switching base maps and toggling overlays
 layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
@@ -544,6 +547,7 @@ function resetApp() {
     foundCoffeePoints = [];
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
+    currentRouteIndex = null;
     downloadBtn.disabled = true;
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
@@ -636,9 +640,9 @@ async function parseRouteFile(file) {
   throw new Error('Unsupported file type. Please upload a .gpx or .fit file.');
 }
 
-function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters) {
+function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters, routeIndex = currentRouteIndex) {
   // Only include water points close to the route per selected radius
-  const nearPoints = filterPointsNearRoute(geojsonRoute, waterPoints, radiusMeters);
+  const nearPoints = filterPointsNearRoute(geojsonRoute, waterPoints, radiusMeters, routeIndex);
   const waypointFeatures = nearPoints
     .filter(p => typeof (p.lat ?? p.center?.lat) === 'number' && typeof (p.lon ?? p.center?.lon) === 'number')
     .map(p => {
@@ -687,6 +691,8 @@ async function handleRouteFile(file) {
   // A new file is a new route: allow exactly one save for it.
   currentRouteFilename = storageFilenameFor(file);
   savedRouteForFile = false;
+  // Project the route once; every later radius change and export reuses this.
+  currentRouteIndex = buildRouteIndex(geojson);
   setStatus('Computing bounding box …');
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
@@ -697,7 +703,7 @@ async function handleRouteFile(file) {
       setStatus(`Querying ${backend} for water points … (${done})`);
     }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
-    const near = sortPointsByDistance(filterPointsNearRoute(geojson, results, selectedRadiusMeters));
+    const near = sortPointsByDistance(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
     renderWaterMarkers(near, true);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
@@ -755,12 +761,12 @@ if (radiusSelect) {
       const routeFC = currentRouteAsFeatureCollection();
       const msgs = [];
       if (foundWaterPoints.length) {
-        const nearW = sortPointsByDistance(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters));
+        const nearW = sortPointsByDistance(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters, currentRouteIndex));
         renderWaterMarkers(nearW, true);
         msgs.push(`water ${nearW.length}/${foundWaterPoints.length}`);
       }
       if (foundCoffeePoints.length) {
-        const nearC = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters));
+        const nearC = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
         renderCoffeeMarkers(nearC, true);
         msgs.push(`coffee ${nearC.length}/${foundCoffeePoints.length}`);
       }
@@ -796,7 +802,7 @@ if (navCoffeeBtn) {
         setStatus(`Querying Overpass for coffee … (${done})`);
       }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundCoffeePoints = results || [];
-      const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters));
+      const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
       renderCoffeeMarkers(near, true);
       setStatus(`Found ${near.length} near-route coffee places (${foundCoffeePoints.length} total).`);
     } catch (err) {
