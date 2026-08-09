@@ -60,6 +60,7 @@ const {
   validateBbox
 } = require('./security');
 const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
+const { OverpassCache, cacheKey } = require('./overpassCache');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -694,6 +695,12 @@ async function readUpstreamBody(response, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
+const overpassCache = new OverpassCache({
+  maxEntries: positiveInteger(process.env.OVERPASS_CACHE_MAX_ENTRIES, 200, 1, 100000),
+  maxBytes: positiveInteger(process.env.OVERPASS_CACHE_MAX_BYTES, 64 * 1024 * 1024, 0, 2 * 1024 * 1024 * 1024),
+  ttlMs: positiveInteger(process.env.OVERPASS_CACHE_TTL_MS, 6 * 60 * 60 * 1000, 0, 7 * 24 * 60 * 60 * 1000)
+});
+
 // Overpass proxy. Takes { bbox, kind } and builds the query here; it never
 // forwards client-supplied query text (see server/overpassQuery.js).
 app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res) => {
@@ -704,6 +711,16 @@ app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res
   const validation = validateBbox(req.body?.bbox);
   if (!validation.ok) {
     return res.status(400).json({ error: validation.error });
+  }
+
+  // OSM data for a bbox moves on the order of days, so a short-lived cache
+  // costs nothing in freshness and keeps repeat loads off the public endpoint.
+  const key = cacheKey(kind, validation.value);
+  const cached = overpassCache.get(key);
+  if (cached) {
+    res.setHeader('Content-Type', cached.contentType);
+    res.setHeader('X-Cache', 'HIT');
+    return res.send(cached.body);
   }
 
   try {
@@ -717,10 +734,13 @@ app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res
         upstreamResp,
         OVERPASS_MAX_RESPONSE_BYTES
       );
-      res.status(upstreamResp.status);
-      // Pass through content type if available
       const ct = upstreamResp.headers.get('content-type') || 'text/xml; charset=utf-8';
+      // Only successful bodies are worth keeping; an error page cached for six
+      // hours would be far worse than re-asking.
+      if (upstreamResp.ok) overpassCache.set(key, responseBody, ct);
+      res.status(upstreamResp.status);
       res.setHeader('Content-Type', ct);
+      res.setHeader('X-Cache', 'MISS');
       return res.send(responseBody);
     } finally {
       clearTimeout(timer);
