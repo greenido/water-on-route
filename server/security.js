@@ -146,14 +146,54 @@ function anonymizeIp(ip) {
   return null;
 }
 
-function isAllowedOrigin(origin, host) {
-  if (!origin) return true;
+/**
+ * Same-origin check.
+ *
+ * @param {string|undefined} origin the request's Origin header
+ * @param {string|undefined} host the request's Host header
+ * @param {{allowMissing?: boolean}} [options] when allowMissing is false the
+ *   request must carry an Origin. Browsers always send one on state-changing
+ *   requests, so requiring it costs nothing and turns away naive automation.
+ */
+function isAllowedOrigin(origin, host, options = {}) {
+  const allowMissing = options.allowMissing !== false;
+  if (!origin) return allowMissing;
   if (!host) return false;
   try {
     return new URL(origin).host === host;
   } catch {
     return false;
   }
+}
+
+// A route bbox larger than this is refused, which keeps a single request from
+// asking Overpass for a continent. The client's adaptive splitter treats the
+// resulting 400 as a signal to split, so oversized routes still resolve.
+const MAX_BBOX_SPAN_DEGREES = 12;
+
+/**
+ * Validate a client-supplied bounding box.
+ * @returns {{ok: true, value: object}|{ok: false, error: string}}
+ */
+function validateBbox(bbox) {
+  const keys = ['minlat', 'minlon', 'maxlat', 'maxlon'];
+  if (!bbox || typeof bbox !== 'object' || Array.isArray(bbox)) {
+    return { ok: false, error: 'bbox is required' };
+  }
+  if (!keys.every((key) => isFiniteNumber(bbox[key]))) {
+    return { ok: false, error: 'bbox must contain finite numeric bounds' };
+  }
+  const { minlat, minlon, maxlat, maxlon } = bbox;
+  if (minlat < -90 || maxlat > 90 || minlon < -180 || maxlon > 180) {
+    return { ok: false, error: 'bbox is outside valid coordinate bounds' };
+  }
+  if (minlat > maxlat || minlon > maxlon) {
+    return { ok: false, error: 'bbox bounds are inverted' };
+  }
+  if (maxlat - minlat > MAX_BBOX_SPAN_DEGREES || maxlon - minlon > MAX_BBOX_SPAN_DEGREES) {
+    return { ok: false, error: 'bbox is too large; split it into smaller tiles' };
+  }
+  return { ok: true, value: { minlat, minlon, maxlat, maxlon } };
 }
 
 function normalizeHttpUrl(value) {
@@ -186,5 +226,7 @@ module.exports = {
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,
-  anonymizeIp
+  anonymizeIp,
+  validateBbox,
+  MAX_BBOX_SPAN_DEGREES
 };

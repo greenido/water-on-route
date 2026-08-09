@@ -695,7 +695,7 @@ async function handleRouteFile(file) {
     setStatus(`Querying ${backend} for water points …`);
     const results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
       setStatus(`Querying ${backend} for water points … (${done})`);
-    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
+    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
     const near = sortPointsByDistance(filterPointsNearRoute(geojson, results, selectedRadiusMeters));
     renderWaterMarkers(near, true);
@@ -794,7 +794,7 @@ if (navCoffeeBtn) {
       showLoading(true);
       const results = await fetchOSMCoffeePointsAdaptive(bbox, (done) => {
         setStatus(`Querying Overpass for coffee … (${done})`);
-      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
+      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundCoffeePoints = results || [];
       const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters));
       renderCoffeeMarkers(near, true);
