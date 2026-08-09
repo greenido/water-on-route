@@ -9,6 +9,8 @@ import {
   minDistancePointToLineStringMeters,
   extractRouteLineStrings,
   filterPointsNearRoute,
+  buildRouteIndex,
+  distanceToRouteMeters,
   computeBBoxFromGeoJSON,
   computeRouteLengthKm,
   pointLonLat
@@ -133,6 +135,111 @@ test('pointLonLat prefers node coordinates then centers', () => {
   assert.deepEqual(pointLonLat({ center: { lat: 3, lon: 4 } }), [4, 3]);
   assert.equal(pointLonLat({}), null);
   assert.equal(pointLonLat(null), null);
+});
+
+/** Deterministic PRNG so a failure is reproducible. */
+function makeRandom(seed) {
+  let s = seed;
+  return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+}
+
+test('the indexed distance agrees with the straightforward implementation', () => {
+  // The fast path works in squared projected units with bbox rejection and a
+  // shrinking bound; this pins it to the obvious per-segment implementation.
+  const rand = makeRandom(2024);
+  const coords = [];
+  let lat = 37.3, lon = -122.1;
+  for (let i = 0; i < 400; i++) {
+    lat += (rand() - 0.5) * 0.004;
+    lon += (rand() - 0.5) * 0.004;
+    coords.push([lon, lat]);
+  }
+  const route = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }]
+  };
+  const index = buildRouteIndex(route);
+
+  // Near the route - the only regime the app actually queries - the two agree
+  // to floating-point noise. Far away they can differ by ~1e-6 relative,
+  // because the fast path picks the winning segment by projected distance and
+  // two segments tens of km away can be tied there but not on the ground.
+  let near = 0;
+  let far = 0;
+  for (let i = 0; i < 500; i++) {
+    const p = [-122.1 + (rand() - 0.5) * 0.9, 37.3 + (rand() - 0.5) * 0.9];
+    const naive = minDistancePointToLineStringMeters(p, coords);
+    const fast = distanceToRouteMeters(index, p);
+    const relative = Math.abs(fast - naive) / Math.max(naive, 1);
+    if (naive <= 5000) {
+      assert.ok(relative < 1e-9, `near point ${p}: fast ${fast} vs naive ${naive}`);
+      near++;
+    } else {
+      assert.ok(relative < 1e-4, `far point ${p}: fast ${fast} vs naive ${naive}`);
+      far++;
+    }
+  }
+  assert.ok(near > 0 && far > 0, `expected both regimes exercised, got near=${near} far=${far}`);
+});
+
+test('the cutoff never discards a point that is genuinely inside it', () => {
+  const rand = makeRandom(77);
+  const coords = [];
+  let lat = 45, lon = 7;
+  for (let i = 0; i < 200; i++) {
+    lat += (rand() - 0.5) * 0.003;
+    lon += (rand() - 0.5) * 0.003;
+    coords.push([lon, lat]);
+  }
+  const route = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }] };
+  const index = buildRouteIndex(route);
+
+  for (let i = 0; i < 300; i++) {
+    const p = [7 + (rand() - 0.5) * 0.4, 45 + (rand() - 0.5) * 0.4];
+    const exact = minDistancePointToLineStringMeters(p, coords);
+    for (const cutoff of [50, 150, 500, 2000]) {
+      const bounded = distanceToRouteMeters(index, p, cutoff);
+      if (exact <= cutoff) {
+        assert.ok(Math.abs(bounded - exact) / Math.max(exact, 1) < 1e-6,
+          `cutoff ${cutoff}: expected ${exact}, got ${bounded}`);
+      } else {
+        assert.equal(bounded, Infinity, `cutoff ${cutoff} should reject ${exact} m`);
+      }
+    }
+  }
+});
+
+test('filterPointsNearRoute accepts a prebuilt index and matches the unindexed call', () => {
+  const coords = [[-122, 37], [-122, 37.02], [-121.98, 37.02]];
+  const route = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }] };
+  const points = [
+    { id: 1, lat: 37.0005, lon: -122.0005 },
+    { id: 2, lat: 37.5, lon: -122 }
+  ];
+  const withIndex = filterPointsNearRoute(null, points, 200, buildRouteIndex(route));
+  const withoutIndex = filterPointsNearRoute(route, points, 200);
+  assert.deepEqual(withIndex.map(p => p.id), [1]);
+  assert.deepEqual(withIndex.map(p => p.id), withoutIndex.map(p => p.id));
+  assert.ok(Math.abs(withIndex[0]._distanceM - withoutIndex[0]._distanceM) < 1e-9);
+});
+
+test('buildRouteIndex reports emptiness rather than throwing on a route with no lines', () => {
+  const index = buildRouteIndex({ type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: [0, 0] } }] });
+  assert.equal(index.isEmpty, true);
+  assert.equal(distanceToRouteMeters(index, [0, 0]), Infinity);
+  assert.equal(distanceToRouteMeters(null, [0, 0]), Infinity);
+  assert.deepEqual(filterPointsNearRoute(null, [{ lat: 0, lon: 0 }], 100, index), []);
+});
+
+test('the index still measures true ground metres at high latitude', () => {
+  const index = buildRouteIndex({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[-122.05, 60], [-121.95, 60]] } }]
+  });
+  const p = [-122, 60.0018];
+  const expected = haversineMeters(p, [-122, 60]);
+  const actual = distanceToRouteMeters(index, p);
+  assert.ok(Math.abs(actual - expected) / expected < 0.001, `got ${actual}, want ${expected}`);
 });
 
 test('computeBBoxFromGeoJSON covers every vertex', () => {

@@ -136,26 +136,133 @@ export function pointLonLat(p) {
 }
 
 /**
- * Keep the POIs within maxMeters of the route, annotating each with _distanceM.
+ * Pre-project a route for repeated proximity queries.
+ *
+ * Projecting inside the query loop meant three lonLatToWebMercator calls per
+ * segment per candidate: on a 5,400-point route with 300 candidates that is
+ * ~5M log/tan evaluations, repeated on every radius change. Here the route is
+ * projected once into flat Float64Arrays, with bounding boxes so most segments
+ * can be rejected by comparison instead of arithmetic.
+ *
  * @param {object} geojsonRoute
+ * @returns {{lines: Array<object>, minX: number, minY: number, maxX: number, maxY: number, isEmpty: boolean}}
+ */
+export function buildRouteIndex(geojsonRoute) {
+  const lines = [];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  for (const ls of extractRouteLineStrings(geojsonRoute)) {
+    const xy = new Float64Array(ls.length * 2);
+    let lMinX = Infinity, lMinY = Infinity, lMaxX = -Infinity, lMaxY = -Infinity;
+    for (let i = 0; i < ls.length; i++) {
+      const [x, y] = lonLatToWebMercator(ls[i][0], ls[i][1]);
+      xy[i * 2] = x;
+      xy[i * 2 + 1] = y;
+      if (x < lMinX) lMinX = x;
+      if (x > lMaxX) lMaxX = x;
+      if (y < lMinY) lMinY = y;
+      if (y > lMaxY) lMaxY = y;
+    }
+    lines.push({ xy, minX: lMinX, minY: lMinY, maxX: lMaxX, maxY: lMaxY });
+    if (lMinX < minX) minX = lMinX;
+    if (lMaxX > maxX) maxX = lMaxX;
+    if (lMinY < minY) minY = lMinY;
+    if (lMaxY > maxY) maxY = lMaxY;
+  }
+
+  return { lines, minX, minY, maxX, maxY, isEmpty: lines.length === 0 };
+}
+
+/**
+ * Ground distance from a lon/lat point to an indexed route.
+ *
+ * Works in squared projected units so the inner loop has no sqrt and no cosh,
+ * then descales once at the midpoint between the query and the closest point,
+ * matching what a per-segment implementation computes.
+ *
+ * @param {object} index from buildRouteIndex
+ * @param {[number, number]} lonLat
+ * @param {number} [maxMeters] optional cutoff; returns Infinity when exceeded
+ * @returns {number} metres, or Infinity
+ */
+export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
+  if (!index || index.isEmpty) return Infinity;
+  const [px, py] = lonLatToWebMercator(lonLat[0], lonLat[1]);
+  const scale = mercatorScaleAtY(py);
+
+  // Ground metres -> projected units, so the whole search stays in one space.
+  let bound = Number.isFinite(maxMeters) ? maxMeters * scale : Infinity;
+  if (Number.isFinite(bound)) {
+    if (px < index.minX - bound || px > index.maxX + bound ||
+        py < index.minY - bound || py > index.maxY + bound) {
+      return Infinity;
+    }
+  }
+
+  let bestSq = Number.isFinite(bound) ? bound * bound : Infinity;
+  let bestCy = py;
+  let found = false;
+
+  for (const line of index.lines) {
+    if (Number.isFinite(bound) &&
+        (px < line.minX - bound || px > line.maxX + bound ||
+         py < line.minY - bound || py > line.maxY + bound)) {
+      continue;
+    }
+    const xy = line.xy;
+    for (let i = 2; i < xy.length; i += 2) {
+      const ax = xy[i - 2], ay = xy[i - 1];
+      const bx = xy[i], by = xy[i + 1];
+
+      // Reject the segment on its own bounding box before doing any real work.
+      const loX = ax < bx ? ax : bx;
+      const hiX = ax < bx ? bx : ax;
+      if (px < loX - bound || px > hiX + bound) continue;
+      const loY = ay < by ? ay : by;
+      const hiY = ay < by ? by : ay;
+      if (py < loY - bound || py > hiY + bound) continue;
+
+      const abx = bx - ax;
+      const aby = by - ay;
+      const abLen2 = abx * abx + aby * aby;
+      let t = abLen2 === 0 ? 0 : ((px - ax) * abx + (py - ay) * aby) / abLen2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const cy = ay + t * aby;
+      const dx = px - (ax + t * abx);
+      const dy = py - cy;
+      const dSq = dx * dx + dy * dy;
+
+      if (dSq < bestSq) {
+        bestSq = dSq;
+        bestCy = cy;
+        found = true;
+        // Tightening the bound makes later segments cheaper to reject.
+        bound = Math.sqrt(dSq);
+      }
+    }
+  }
+
+  if (!found) return Infinity;
+  return Math.sqrt(bestSq) / mercatorScaleAtY((py + bestCy) / 2);
+}
+
+/**
+ * Keep the POIs within maxMeters of the route, annotating each with _distanceM.
+ * @param {object|null} geojsonRoute
  * @param {Array<object>} points Overpass-shaped POIs
  * @param {number} maxMeters
+ * @param {object} [routeIndex] a prebuilt index, to avoid re-projecting
  * @returns {Array<object>} copies carrying _distanceM
  */
-export function filterPointsNearRoute(geojsonRoute, points, maxMeters) {
-  const lineStrings = extractRouteLineStrings(geojsonRoute);
-  if (!lineStrings.length) return [];
+export function filterPointsNearRoute(geojsonRoute, points, maxMeters, routeIndex) {
+  const index = routeIndex || buildRouteIndex(geojsonRoute);
+  if (index.isEmpty) return [];
   const result = [];
   for (const p of points || []) {
     const pt = pointLonLat(p);
     if (!pt) continue;
-    let min = Infinity;
-    for (const ls of lineStrings) {
-      const d = minDistancePointToLineStringMeters(pt, ls);
-      if (d < min) min = d;
-      if (min <= maxMeters) break;
-    }
-    if (min <= maxMeters) result.push({ ...p, _distanceM: min });
+    const d = distanceToRouteMeters(index, pt, maxMeters);
+    if (d <= maxMeters) result.push({ ...p, _distanceM: d });
   }
   return result;
 }
