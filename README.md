@@ -154,6 +154,7 @@ If you leave variables unset, sane defaults will be used:
 - `TILE_RATE_LIMIT`: tile requests per client per 15 minutes (default `600`)
 - `ADMIN_RATE_LIMIT`: admin requests per client per 15 minutes (default `60`)
 - `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
+- `ENABLE_GEOIP`: opt in to third-party city lookup for stored IPs (default `false`)
 
 Copy `.env.example` to `.env` for the complete configuration template. Never
 commit `.env` or real credentials.
@@ -221,6 +222,16 @@ The Express server exposes a few endpoints:
 - Raw database download is disabled unless `ENABLE_DB_DOWNLOAD=true`.
 - Upstream response sizes and tile coordinate ranges are bounded.
 - Third-party browser assets are pinned with Subresource Integrity hashes.
+
+### Privacy
+
+- Saving a route is disclosed in the sidebar and can be switched off; the choice
+  is remembered per device. With it off, nothing but anonymous OpenStreetMap
+  queries leaves the browser, and the map and enriched download still work.
+- Stored addresses are reduced to a coarse network before they are written:
+  IPv4 keeps the `/24`, IPv6 keeps the `/48`. Full addresses are never persisted.
+- The city lookup that sends addresses to `ipapi.co` is opt-in via
+  `ENABLE_GEOIP=true`. It is off by default.
 
 ---
 

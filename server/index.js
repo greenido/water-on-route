@@ -43,7 +43,8 @@ const {
   validateRoutePayload,
   validateTileCoordinates,
   isAllowedOrigin,
-  positiveInteger
+  positiveInteger,
+  anonymizeIp
 } = require('./security');
 
 const app = express();
@@ -233,7 +234,9 @@ app.post('/api/routes', uploadLimiter, requireSameOrigin, async (req, res) => {
       hasEnrichedGpx: !!enrichedGpxText
     });
     const fileSize = Buffer.byteLength(gpxText, 'utf8');
-    const clientIp = req.ip || req.socket?.remoteAddress || null;
+    // Store only the coarse network, never the full address: a GPX track plus a
+    // full IP identifies a person, and this endpoint takes no authentication.
+    const clientIp = anonymizeIp(req.ip || req.socket?.remoteAddress || null);
     console.log('[POST /api/routes] Calculated fileSize and clientIp', { fileSize, clientIp });
     const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
     console.log('[POST /api/routes] Route inserted', { id: result.id });
@@ -271,7 +274,10 @@ app.delete('/api/routes/:id', adminLimiter, requireSameOrigin, requireBasicAuth,
   }
 });
 
-// Simple GeoIP lookup with caching. Uses ipapi.co (no key) unless GEOIP_URL provided.
+// Optional GeoIP lookup with caching. Uses ipapi.co (no key) unless GEOIP_URL
+// is provided. Off by default: it forwards visitor addresses to a third party,
+// so switching it on is an explicit choice the operator has to make.
+const GEOIP_ENABLED = process.env.ENABLE_GEOIP === 'true';
 const GEOIP_CACHE = new Map();
 const GEOIP_TTL_MS = 1000 * 60 * 60; // 1 hour
 const PRIVATE_IP_RE = /^(?:127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+|::1|fc00:|fe80:)/;
@@ -299,6 +305,7 @@ function cacheSet(ip, value) {
 }
 
 app.get('/api/geoip/:ip', adminLimiter, requireBasicAuth, async (req, res) => {
+  if (!GEOIP_ENABLED) return res.json({ ok: true, location: '' });
   const ip = String(req.params.ip || '').trim();
   if (!net.isIP(ip)) return res.status(400).json({ error: 'valid IP required' });
   if (isPrivateIp(ip)) return res.json({ ok: true, location: '' });

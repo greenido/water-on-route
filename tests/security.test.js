@@ -7,7 +7,8 @@ const {
   validateTileCoordinates,
   isAllowedOrigin,
   normalizeHttpUrl,
-  positiveInteger
+  positiveInteger,
+  anonymizeIp
 } = require('../server/security');
 
 test('safeEqual accepts equal values and rejects different lengths and values', () => {
@@ -69,6 +70,37 @@ test('normalizeHttpUrl accepts HTTP URLs and rejects script schemes', () => {
   assert.equal(normalizeHttpUrl('https://example.com/path'), 'https://example.com/path');
   assert.equal(normalizeHttpUrl('example.com'), 'https://example.com/');
   assert.equal(normalizeHttpUrl('javascript:alert(1)'), null);
+});
+
+test('anonymizeIp drops the host portion of IPv4 addresses', () => {
+  assert.equal(anonymizeIp('203.0.113.45'), '203.0.113.0');
+  assert.equal(anonymizeIp('  8.8.8.8  '), '8.8.8.0');
+  assert.equal(anonymizeIp('127.0.0.1'), '127.0.0.0');
+});
+
+test('anonymizeIp keeps only the /48 of IPv6 addresses', () => {
+  assert.equal(anonymizeIp('2001:db8:85a3:8d3:1319:8a2e:370:7348'), '2001:db8:85a3::');
+  assert.equal(anonymizeIp('2001:db8:85a3::8a2e:370:7334'), '2001:db8:85a3::');
+  assert.equal(anonymizeIp('::1'), '0:0:0::');
+});
+
+test('anonymizeIp normalizes IPv4-mapped IPv6 to the IPv4 form', () => {
+  assert.equal(anonymizeIp('::ffff:203.0.113.45'), '203.0.113.0');
+});
+
+test('anonymizeIp rejects anything that is not an address', () => {
+  assert.equal(anonymizeIp(null), null);
+  assert.equal(anonymizeIp(undefined), null);
+  assert.equal(anonymizeIp(''), null);
+  assert.equal(anonymizeIp('   '), null);
+  assert.equal(anonymizeIp('not-an-ip'), null);
+  assert.equal(anonymizeIp('999.1.1.1'), null);
+  assert.equal(anonymizeIp(12345), null);
+});
+
+test('anonymizeIp is idempotent, so re-storing a value cannot widen it', () => {
+  assert.equal(anonymizeIp(anonymizeIp('203.0.113.45')), '203.0.113.0');
+  assert.equal(anonymizeIp(anonymizeIp('2001:db8:85a3::8a2e:370:7334')), '2001:db8:85a3::');
 });
 
 test('positiveInteger bounds numeric environment configuration', () => {
