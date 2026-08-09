@@ -44,8 +44,10 @@ const {
   validateTileCoordinates,
   isAllowedOrigin,
   positiveInteger,
-  anonymizeIp
+  anonymizeIp,
+  validateBbox
 } = require('./security');
+const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -144,6 +146,16 @@ function requireSameOrigin(req, res, next) {
   return next();
 }
 
+// For state-changing endpoints: the Origin header must be present and match.
+// Browsers always send it on non-GET requests, so this only turns away clients
+// that are not a browser at all.
+function requireSameOriginStrict(req, res, next) {
+  if (!isAllowedOrigin(req.get('origin'), req.get('host'), { allowMissing: false })) {
+    return res.status(403).json({ error: 'Cross-origin request denied' });
+  }
+  return next();
+}
+
 // serve favicon assets
 app.get('/favicon.svg', (req, res) => {
   res.sendFile(path.join(__dirname, '../favicon.svg'));
@@ -216,10 +228,40 @@ function requireBasicAuth(req, res, next) {
   return res.status(401).send('Invalid credentials');
 }
 
+// Uploads are anonymous by design, so the only thing standing between the
+// volume and a filler is the rate limit. Stop accepting new routes before the
+// disk fills, which would take the whole app down rather than just this
+// endpoint. Checked against the live file size, cached briefly.
+const MAX_ROUTE_DB_BYTES = positiveInteger(
+  process.env.MAX_ROUTE_DB_BYTES,
+  512 * 1024 * 1024,
+  1024 * 1024,
+  64 * 1024 * 1024 * 1024
+);
+let dbSizeCache = { bytes: 0, checkedAt: 0 };
+const DB_SIZE_TTL_MS = 30 * 1000;
+
+async function isRouteStorageFull() {
+  const now = Date.now();
+  if (now - dbSizeCache.checkedAt > DB_SIZE_TTL_MS) {
+    try {
+      const stat = await fs.promises.stat(DB_PATH);
+      dbSizeCache = { bytes: stat.size, checkedAt: now };
+    } catch (e) {
+      // A missing file means nothing has been written yet.
+      dbSizeCache = { bytes: 0, checkedAt: now };
+    }
+  }
+  return dbSizeCache.bytes >= MAX_ROUTE_DB_BYTES;
+}
+
 // API: Save a route (raw GPX plus summary)
 // body: { filename, gpxText, bbox, routeKm, waypointsCount }
-app.post('/api/routes', uploadLimiter, requireSameOrigin, async (req, res) => {
+app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res) => {
   try {
+    if (await isRouteStorageFull()) {
+      return res.status(507).json({ error: 'Route storage is full' });
+    }
     const validation = validateRoutePayload(req.body);
     if (!validation.ok) {
       return res.status(400).json({ error: validation.error });
@@ -259,7 +301,7 @@ app.get('/api/routes', adminLimiter, requireBasicAuth, async (_req, res) => {
 });
 
 // API: Delete route (protected)
-app.delete('/api/routes/:id', adminLimiter, requireSameOrigin, requireBasicAuth, async (req, res) => {
+app.delete('/api/routes/:id', adminLimiter, requireSameOriginStrict, requireBasicAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -628,29 +670,24 @@ async function readUpstreamBody(response, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
-app.post('/api/overpass', proxyLimiter, requireSameOrigin, async (req, res) => {
+// Overpass proxy. Takes { bbox, kind } and builds the query here; it never
+// forwards client-supplied query text (see server/overpassQuery.js).
+app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res) => {
+  const kind = String(req.body?.kind || 'water');
+  if (!QUERY_KINDS.includes(kind)) {
+    return res.status(400).json({ error: `kind must be one of: ${QUERY_KINDS.join(', ')}` });
+  }
+  const validation = validateBbox(req.body?.bbox);
+  if (!validation.ok) {
+    return res.status(400).json({ error: validation.error });
+  }
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
     try {
-      let body;
-      let headers;
-      if (typeof req.body === 'object' && req.headers['content-type']?.includes('application/json')) {
-        const query = String(req.body.query || req.body.data || '');
-        if (!query || Buffer.byteLength(query, 'utf8') > 64 * 1024) {
-          return res.status(400).send('Invalid Overpass query');
-        }
-        body = 'data=' + encodeURIComponent(query);
-        headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
-      } else {
-        // urlencoded already parsed into req.body; rebuild search params
-        const query = String(req.body.data || req.body.query || '');
-        if (!query || Buffer.byteLength(query, 'utf8') > 64 * 1024) {
-          return res.status(400).send('Invalid Overpass query');
-        }
-        body = 'data=' + encodeURIComponent(query);
-        headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
-      }
+      const body = 'data=' + encodeURIComponent(buildQueryForKind(kind, validation.value));
+      const headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
       const upstreamResp = await fetch(OVERPASS_URL, { method: 'POST', headers, body, signal: controller.signal });
       const responseBody = await readUpstreamBody(
         upstreamResp,

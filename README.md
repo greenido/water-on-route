@@ -155,6 +155,7 @@ If you leave variables unset, sane defaults will be used:
 - `ADMIN_RATE_LIMIT`: admin requests per client per 15 minutes (default `60`)
 - `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
 - `ENABLE_GEOIP`: opt in to third-party city lookup for stored IPs (default `false`)
+- `MAX_ROUTE_DB_BYTES`: refuse new uploads past this DB size (default `536870912`)
 
 Copy `.env.example` to `.env` for the complete configuration template. Never
 commit `.env` or real credentials.
@@ -196,8 +197,12 @@ The Express server exposes a few endpoints:
 - `GET /app.js`, `GET /styles.css`, `GET /osmApi.mjs`, `GET /test.html` – static assets
 - `GET /health` – simple health check
 - `POST /api/overpass` – Overpass proxy
-  - Accepts either `application/json` with `{ query: "..." }` or `application/x-www-form-urlencoded` with `data=...`
-  - Returns Overpass response as text, passing through the content-type when available
+  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" }`
+  - The Overpass QL is built server-side from these two inputs; client-supplied
+    query text is never forwarded, so the endpoint cannot be used as an open relay
+  - Same-origin requests only; a bbox spanning more than 12° on a side is rejected
+    with `400`, which the client treats as a signal to split and retry
+  - Returns the Overpass response as text, passing through the content-type when available
 - `GET /tiles/{z}/{x}/{y}.png` – tile proxy
   - Fetches the tile from `TILE_URL_TEMPLATE` and forwards it with caching headers
 
@@ -217,7 +222,12 @@ The Express server exposes a few endpoints:
 
 - Helmet sets CSP, clickjacking, MIME-sniffing, referrer, and HTTPS headers.
 - Route uploads, upstream proxies, tiles, and admin endpoints are rate-limited.
-- Browser state-changing requests are restricted to the same origin.
+- Overpass queries are built server-side from a validated bbox and a fixed set of
+  kinds; arbitrary query text is never proxied.
+- State-changing requests must carry a matching `Origin` header, so they cannot be
+  replayed by a plain HTTP client.
+- Route uploads stop with `507` once the database reaches `MAX_ROUTE_DB_BYTES`,
+  so an anonymous endpoint cannot fill the volume and take the app down.
 - Admin credentials use timing-safe comparisons and are mandatory in production.
 - Raw database download is disabled unless `ENABLE_DB_DOWNLOAD=true`.
 - Upstream response sizes and tile coordinate ranges are bounded.

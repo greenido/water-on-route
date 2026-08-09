@@ -13,30 +13,20 @@ export async function fetchWithTimeout(url, options, timeoutMs, fetchImpl) {
   }
 }
 
-export async function fetchOsmMapXml(bbox, timeoutMs = 30000, fetchImpl) {
-  const bboxParam = `${bbox.minlon},${bbox.minlat},${bbox.maxlon},${bbox.maxlat}`; // lon,lat order per OSM API
-  const url = `https://api.openstreetmap.org/api/0.6/map?bbox=${bboxParam}`;
-  const resp = await fetchWithTimeout(url, { method: 'GET' }, timeoutMs, fetchImpl);
-  if (!resp.ok) {
-    let serverMsg = '';
-    try { serverMsg = await resp.text(); } catch (_) {}
-    const trimmed = serverMsg ? serverMsg.slice(0, 200) : '';
-    const err = new Error(`OSM API error: ${resp.status}${trimmed ? ` - ${trimmed}` : ''}`);
-    // Attach status to error for programmatic handling
-    err.status = resp.status;
-    throw err;
-  }
-  return await resp.text();
-}
-
-// Determine Overpass endpoint from optional runtime config
+/**
+ * The same-origin proxy endpoint.
+ *
+ * There is deliberately no public-Overpass fallback: the proxy builds the
+ * query server-side, and the page's CSP restricts connect-src to 'self'
+ * anyway, so a direct upstream call could never have succeeded.
+ */
 export function getOverpassUrl() {
   try {
     if (typeof window !== 'undefined' && window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) {
       return window.WOR_CONFIG.overpassUrl;
     }
   } catch (_) {}
-  return 'https://overpass-api.de/api/interpreter';
+  return '/api/overpass';
 }
 
 /** Potable water: classic OSM tags plus park fountains / taps / wells. Excludes drinking_water=no. */
@@ -83,64 +73,27 @@ export function isCoffeeTags(tags) {
   return false;
 }
 
-export function buildOverpassWaterQuery(b) {
-  const bboxPart = `${b.minlat},${b.minlon},${b.maxlat},${b.maxlon}`; // lat,lon order for Overpass bbox
-  // drinking_water=no excluded in parser; Overpass also skips fountain/well without potable tag
-  return `
-    [out:xml][timeout:25];
-    (
-      node["amenity"="drinking_water"](${bboxPart});
-      node["natural"="spring"](${bboxPart});
-      node["man_made"="water_tap"](${bboxPart});
-      node["amenity"="water_point"](${bboxPart});
-      node["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      node["man_made"="water_well"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      node["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      way["amenity"="drinking_water"](${bboxPart});
-      way["natural"="spring"](${bboxPart});
-      way["man_made"="water_tap"](${bboxPart});
-      way["amenity"="water_point"](${bboxPart});
-      way["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      way["man_made"="water_well"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      way["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      relation["amenity"="drinking_water"](${bboxPart});
-      relation["natural"="spring"](${bboxPart});
-      relation["man_made"="water_tap"](${bboxPart});
-      relation["amenity"="water_point"](${bboxPart});
-      relation["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      relation["man_made"="water_well"]["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-      relation["drinking_water"~"^(yes|compatible)$"](${bboxPart});
-    );
-    out body center qt;
-  `;
-}
-
-// Build Overpass query for coffee-related POIs
-export function buildOverpassCoffeeQuery(b) {
-  const bboxPart = `${b.minlat},${b.minlon},${b.maxlat},${b.maxlon}`; // lat,lon order for Overpass bbox
-  const cuisineRe = 'coffee|cafe|coffee_shop|espresso';
-  return `
-    [out:xml][timeout:25];
-    (
-      node["amenity"="cafe"](${bboxPart});
-      node["shop"="coffee"](${bboxPart});
-      node["amenity"="restaurant"]["cuisine"~"${cuisineRe}", i](${bboxPart});
-      way["amenity"="cafe"](${bboxPart});
-      way["shop"="coffee"](${bboxPart});
-      way["amenity"="restaurant"]["cuisine"~"${cuisineRe}", i](${bboxPart});
-      relation["amenity"="cafe"](${bboxPart});
-      relation["shop"="coffee"](${bboxPart});
-      relation["amenity"="restaurant"]["cuisine"~"${cuisineRe}", i](${bboxPart});
-    );
-    out body center qt;
-  `;
-}
-
-export async function fetchOverpassXml(bbox, timeoutMs = 30000, fetchImpl, buildQuery = buildOverpassWaterQuery) {
-  const url = getOverpassUrl();
-  const query = buildQuery(bbox);
-  const body = 'data=' + encodeURIComponent(query);
-  const resp = await fetchWithTimeout(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body }, timeoutMs, fetchImpl);
+/**
+ * Ask the proxy for one bbox worth of POIs.
+ *
+ * Only the box and the kind travel over the wire; the Overpass QL is built
+ * server-side so the endpoint cannot be used to run arbitrary queries.
+ *
+ * @param {object} bbox {minlat, minlon, maxlat, maxlon}
+ * @param {'water'|'coffee'} kind
+ * @returns {Promise<string>} Overpass XML
+ */
+export async function fetchOverpassXml(bbox, kind = 'water', timeoutMs = 30000, fetchImpl) {
+  const resp = await fetchWithTimeout(
+    getOverpassUrl(),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bbox, kind })
+    },
+    timeoutMs,
+    fetchImpl
+  );
   if (!resp.ok) {
     let serverMsg = '';
     try { serverMsg = await resp.text(); } catch (_) {}
@@ -150,12 +103,6 @@ export async function fetchOverpassXml(bbox, timeoutMs = 30000, fetchImpl, build
     throw err;
   }
   return await resp.text();
-}
-
-// Fetch coffee POIs from Overpass into unified points array (like water parser)
-export async function fetchOverpassCoffeePoints(bbox, timeoutMs = 30000, fetchImpl) {
-  const xmlText = await fetchOverpassXml(bbox, timeoutMs, fetchImpl, buildOverpassCoffeeQuery);
-  return parseOsmXmlGeneric(xmlText).filter((p) => isCoffeeTags(p.tags));
 }
 
 function collectTags(el) {
@@ -294,17 +241,22 @@ export function dedupePointsByTypeId(points) {
 function getStatusFromError(err) {
   if (!err) return undefined;
   if (typeof err.status === 'number') return err.status;
-  const m = /(?:OSM API|Overpass) error:\s*(\d{3})/.exec(err.message || '');
+  const m = /Overpass error:\s*(\d{3})/.exec(err.message || '');
   if (m) return Number(m[1]);
   return undefined;
 }
 
 /**
- * Adaptive Overpass (or OSM map) fetch with bbox split on 400/429/504.
+ * Adaptive Overpass fetch, splitting the bbox on 400/429/504.
+ *
+ * A 400 is treated as splittable because the proxy rejects boxes above its
+ * span cap with exactly that status, so an oversized route resolves by
+ * subdividing rather than failing.
+ *
  * @param {object} bbox
  * @param {function|null} onProgress
  * @param {object} options
- * @param {function} [options.buildQuery] - Overpass QL builder (default: water)
+ * @param {'water'|'coffee'} [options.kind]
  * @param {function} [options.parseXml] - XML → points (default: water parser)
  */
 export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}) {
@@ -313,17 +265,14 @@ export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}
   const initialBackoffMs = options.initialBackoffMs ?? 500;
   const maxBackoffMs = options.maxBackoffMs ?? 4000;
   const fetchImpl = options.fetchImpl; // optional for tests
-  const source = options.source ?? 'overpass'; // 'overpass' (default) or 'osm'
-  const buildQuery = options.buildQuery ?? buildOverpassWaterQuery;
+  const kind = options.kind ?? 'water';
   const parseXml = options.parseXml ?? parseOsmXmlForWater;
 
   let tilesFetched = 0;
 
   async function fetchTile(tile, attempt) {
     try {
-      const xml = source === 'overpass'
-        ? await fetchOverpassXml(tile, timeoutMs, fetchImpl, buildQuery)
-        : await fetchOsmMapXml(tile, timeoutMs, fetchImpl);
+      const xml = await fetchOverpassXml(tile, kind, timeoutMs, fetchImpl);
       tilesFetched++;
       if (onProgress) onProgress(tilesFetched, undefined);
       return parseXml(xml);
@@ -353,7 +302,7 @@ export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}
 export async function fetchOSMWaterPointsAdaptive(bbox, onProgress, options = {}) {
   return fetchOverpassPointsAdaptive(bbox, onProgress, {
     ...options,
-    buildQuery: buildOverpassWaterQuery,
+    kind: 'water',
     parseXml: parseOsmXmlForWater,
   });
 }
@@ -361,7 +310,7 @@ export async function fetchOSMWaterPointsAdaptive(bbox, onProgress, options = {}
 export async function fetchOSMCoffeePointsAdaptive(bbox, onProgress, options = {}) {
   return fetchOverpassPointsAdaptive(bbox, onProgress, {
     ...options,
-    buildQuery: buildOverpassCoffeeQuery,
+    kind: 'coffee',
     parseXml: (xml) => parseOsmXmlGeneric(xml).filter((p) => isCoffeeTags(p.tags)),
   });
 }

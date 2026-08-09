@@ -8,7 +8,9 @@ const {
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,
-  anonymizeIp
+  anonymizeIp,
+  validateBbox,
+  MAX_BBOX_SPAN_DEGREES
 } = require('../server/security');
 
 test('safeEqual accepts equal values and rejects different lengths and values', () => {
@@ -64,6 +66,49 @@ test('isAllowedOrigin permits same-origin and non-browser requests only', () => 
   assert.equal(isAllowedOrigin('https://water.example', 'water.example'), true);
   assert.equal(isAllowedOrigin('https://evil.example', 'water.example'), false);
   assert.equal(isAllowedOrigin('not a URL', 'water.example'), false);
+});
+
+test('isAllowedOrigin can require the Origin header for state-changing routes', () => {
+  const strict = { allowMissing: false };
+  assert.equal(isAllowedOrigin(undefined, 'water.example', strict), false);
+  assert.equal(isAllowedOrigin('', 'water.example', strict), false);
+  assert.equal(isAllowedOrigin('https://water.example', 'water.example', strict), true);
+  assert.equal(isAllowedOrigin('https://evil.example', 'water.example', strict), false);
+});
+
+test('validateBbox accepts a well-formed box and normalizes to four keys', () => {
+  const result = validateBbox({ minlat: 37, minlon: -122.4, maxlat: 37.4, maxlon: -122, extra: 'ignored' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, { minlat: 37, minlon: -122.4, maxlat: 37.4, maxlon: -122 });
+});
+
+test('validateBbox rejects missing, malformed and non-numeric input', () => {
+  assert.equal(validateBbox(undefined).ok, false);
+  assert.equal(validateBbox(null).ok, false);
+  assert.equal(validateBbox('37,-122').ok, false);
+  assert.equal(validateBbox([37, -122, 38, -121]).ok, false);
+  assert.equal(validateBbox({ minlat: 37, minlon: -122 }).ok, false);
+  assert.equal(validateBbox({ minlat: NaN, minlon: 0, maxlat: 1, maxlon: 1 }).ok, false);
+  assert.equal(validateBbox({ minlat: '37', minlon: 0, maxlat: 1, maxlon: 1 }).ok, false);
+});
+
+test('validateBbox rejects out-of-range and inverted bounds', () => {
+  assert.equal(validateBbox({ minlat: -91, minlon: 0, maxlat: 1, maxlon: 1 }).ok, false);
+  assert.equal(validateBbox({ minlat: 0, minlon: 0, maxlat: 91, maxlon: 1 }).ok, false);
+  assert.equal(validateBbox({ minlat: 0, minlon: -181, maxlat: 1, maxlon: 1 }).ok, false);
+  assert.equal(validateBbox({ minlat: 0, minlon: 0, maxlat: 1, maxlon: 181 }).ok, false);
+  assert.match(validateBbox({ minlat: 5, minlon: 0, maxlat: 1, maxlon: 1 }).error, /inverted/);
+  assert.match(validateBbox({ minlat: 0, minlon: 5, maxlat: 1, maxlon: 1 }).error, /inverted/);
+});
+
+test('validateBbox caps the span so one request cannot ask for a continent', () => {
+  const over = MAX_BBOX_SPAN_DEGREES + 0.1;
+  assert.match(validateBbox({ minlat: 0, minlon: 0, maxlat: over, maxlon: 1 }).error, /too large/);
+  assert.match(validateBbox({ minlat: 0, minlon: 0, maxlat: 1, maxlon: over }).error, /too large/);
+  // The whole planet is the case that matters most.
+  assert.match(validateBbox({ minlat: -90, minlon: -180, maxlat: 90, maxlon: 180 }).error, /too large/);
+  // A box exactly at the cap is still allowed.
+  assert.equal(validateBbox({ minlat: 0, minlon: 0, maxlat: MAX_BBOX_SPAN_DEGREES, maxlon: 1 }).ok, true);
 });
 
 test('normalizeHttpUrl accepts HTTP URLs and rejects script schemes', () => {

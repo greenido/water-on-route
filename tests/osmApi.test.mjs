@@ -5,8 +5,6 @@ import {
   isPotableWaterTags,
   waterSubtypeLabel,
   isCoffeeTags,
-  buildOverpassWaterQuery,
-  buildOverpassCoffeeQuery,
   bboxSpan,
   splitBboxIntoQuads,
   dedupePointsByTypeId,
@@ -59,26 +57,6 @@ test('isCoffeeTags covers cafes, coffee shops and coffee-cuisine restaurants', (
   assert.equal(isCoffeeTags({ amenity: 'restaurant', cuisine: 'pizza' }), false);
   assert.equal(isCoffeeTags({ amenity: 'restaurant' }), false);
   assert.equal(isCoffeeTags(null), false);
-});
-
-test('Overpass queries emit bbox in lat,lon order', () => {
-  // Overpass wants (south,west,north,east); swapping silently returns nothing.
-  const query = buildOverpassWaterQuery(BBOX);
-  assert.ok(query.includes('37,-122.4,37.4,-122'), query.slice(0, 200));
-  assert.ok(buildOverpassCoffeeQuery(BBOX).includes('37,-122.4,37.4,-122'));
-});
-
-test('water query asks for potable variants and skips unmarked fountains/wells', () => {
-  const query = buildOverpassWaterQuery(BBOX);
-  assert.ok(query.includes('node["amenity"="drinking_water"]'));
-  assert.ok(query.includes('way["natural"="spring"]'));
-  assert.ok(query.includes('relation["man_made"="water_tap"]'));
-  assert.ok(query.includes('node["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"]'));
-  assert.ok(query.includes('out body center qt;'));
-});
-
-test('coffee query matches cuisine case-insensitively', () => {
-  assert.ok(buildOverpassCoffeeQuery(BBOX).includes('"cuisine"~"coffee|cafe|coffee_shop|espresso", i'));
 });
 
 test('bboxSpan reports non-negative extents', () => {
@@ -155,13 +133,30 @@ function reply(status, body = '') {
   return { ok: status >= 200 && status < 300, status, text: async () => body };
 }
 
+test('the client sends only a bbox and a kind, never query text', async () => {
+  const sent = [];
+  const fetchImpl = async (url, options) => {
+    sent.push({ url, contentType: options.headers['Content-Type'], body: JSON.parse(options.body) });
+    return reply(200, 'ok');
+  };
+  await fetchOverpassPointsAdaptive(BBOX, null, { fetchImpl, kind: 'coffee', parseXml: () => [] });
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, '/api/overpass');
+  assert.equal(sent[0].contentType, 'application/json');
+  assert.deepEqual(Object.keys(sent[0].body).sort(), ['bbox', 'kind']);
+  assert.equal(sent[0].body.kind, 'coffee');
+  assert.deepEqual(sent[0].body.bbox, BBOX);
+});
+
 test('adaptive fetch splits the bbox on 429 and merges the quads', async () => {
   const requested = [];
   const fetchImpl = async (_url, options) => {
-    const bboxPart = decodeURIComponent(options.body).match(/\((-?[\d.]+,-?[\d.]+,-?[\d.]+,-?[\d.]+)\)/)[1];
-    requested.push(bboxPart);
+    const { bbox } = JSON.parse(options.body);
+    const key = `${bbox.minlat},${bbox.minlon},${bbox.maxlat},${bbox.maxlon}`;
+    requested.push(key);
     // Only the full-size parent is rate limited.
-    return requested.length === 1 ? reply(429, 'slow down') : reply(200, bboxPart);
+    return requested.length === 1 ? reply(429, 'slow down') : reply(200, key);
   };
 
   const points = await fetchOverpassPointsAdaptive(BBOX, null, {
@@ -173,6 +168,24 @@ test('adaptive fetch splits the bbox on 429 and merges the quads', async () => {
 
   assert.equal(requested.length, 5, 'one failed parent plus four quads');
   assert.equal(points.length, 4);
+});
+
+test('a 400 from the span cap is treated as splittable', async () => {
+  // The proxy rejects oversized boxes with 400; the client must subdivide
+  // rather than give up, otherwise long routes stop working entirely.
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return calls === 1 ? reply(400, 'bbox is too large; split it into smaller tiles') : reply(200, 'ok');
+  };
+  const points = await fetchOverpassPointsAdaptive(BBOX, null, {
+    fetchImpl,
+    initialBackoffMs: 0,
+    minSpan: 0.01,
+    parseXml: () => [{ _type: 'node', id: calls }]
+  });
+  assert.equal(calls, 5);
+  assert.ok(points.length > 0);
 });
 
 test('adaptive fetch stops splitting once the bbox reaches minSpan', async () => {
