@@ -11,6 +11,10 @@
  * ESM imports:
  *   - fetchOSMWaterPointsAdaptive from ./osmApi.mjs
  *   - parseFitToGeoJSON from ./fitToGeoJSON.mjs
+ *   - geometry helpers from ./geo.mjs
+ *
+ * Each loaded file is persisted at most once (see saveRoute); rendering is a
+ * pure view concern and must stay free of side effects.
  *
  * UX features:
  *   - Drag & drop or file picker for GPX / FIT
@@ -178,6 +182,10 @@ let originalGpxText = '';
 let foundWaterPoints = [];
 let foundCoffeePoints = [];
 let layersControl = null;
+// Name of the file currently loaded, and whether it has already been persisted.
+// Guards against re-uploading the same route on every radius change.
+let currentRouteFilename = 'route.gpx';
+let savedRouteForFile = false;
 
 // Layers control: allow switching base maps and toggling overlays
 layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
@@ -301,7 +309,21 @@ function ensureToGpxAvailable() {
   return ensureToGpxPromise;
 }
 
-async function renderWaterMarkers(points, animate = false) {
+/**
+ * The displayed route as a FeatureCollection, preferring the Leaflet layer so
+ * exports match exactly what the user sees.
+ */
+function currentRouteAsFeatureCollection() {
+  const routeGeo = (routeLayer && typeof routeLayer.toGeoJSON === 'function')
+    ? routeLayer.toGeoJSON()
+    : currentRouteGeoJSON;
+  if (!routeGeo) return { type: 'FeatureCollection', features: [] };
+  return routeGeo.type === 'FeatureCollection'
+    ? routeGeo
+    : { type: 'FeatureCollection', features: [routeGeo] };
+}
+
+function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
   points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.description) || 'Water';
@@ -343,50 +365,45 @@ async function renderWaterMarkers(points, animate = false) {
     }
   });
 
-  // --- Save the route in the DB via /api/routes ---
+}
+
+/**
+ * Persist the loaded route once.
+ *
+ * This deliberately lives outside renderWaterMarkers: rendering happens again
+ * on every radius change, and saving from there uploaded the whole GPX each
+ * time, filling the database with duplicates of the same route.
+ *
+ * @param {Array<object>} points near-route water points at the current radius
+ */
+async function saveRoute(points) {
+  if (savedRouteForFile) return;
+  if (!currentRouteGeoJSON || !Array.isArray(points) || points.length === 0) return;
+  if (!originalGpxText) return;
+
+  savedRouteForFile = true;
   try {
-    // Only attempt if we have a route and water points
-    if (typeof currentRouteGeoJSON !== 'undefined' && currentRouteGeoJSON && Array.isArray(points) && points.length > 0) {
-      // Compute bbox and route length if possible
-      const bbox = computeBBoxFromGeoJSON(currentRouteGeoJSON);
-      const routeKm = Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2));
-      // Try to get the original GPX text if available
-      const gpxText = typeof originalGpxText !== 'undefined' ? originalGpxText : null;
-      // Compose filename if possible (FIT uploads are stored as GPX text)
-      let filename = (typeof fileInput !== 'undefined' && fileInput && fileInput.files && fileInput.files[0])
-        ? fileInput.files[0].name
-        : 'route.gpx';
-      if (/\.fit$/i.test(filename)) {
-        filename = filename.replace(/\.fit$/i, '.gpx');
-      }      // Build enriched GPX and include water points
-      await ensureToGpxAvailable();
-      const routeGeo = (routeLayer && typeof routeLayer.toGeoJSON === 'function') ? routeLayer.toGeoJSON() : currentRouteGeoJSON;
-      const routeFC = routeGeo && routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
-      const enrichedGpxText = combineToEnrichedGpx(routeFC, points, selectedRadiusMeters);
-      // Compose payload
-      const payload = {
-        filename,
-        gpxText,
-        bbox,
-        routeKm,
-        waypointsCount: points.length,
-        waterPoints: points,
-        enrichedGpxText
-      };
-      // POST to /api/routes
-      await fetch('/api/routes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      // Optionally: could handle response or errors here
-    }
-    else {
-      console.warn('[renderWaterMarkers] No route or water points to save');
-    }
+    await ensureToGpxAvailable();
+    const routeFC = currentRouteAsFeatureCollection();
+    const payload = {
+      filename: currentRouteFilename,
+      gpxText: originalGpxText,
+      bbox: computeBBoxFromGeoJSON(currentRouteGeoJSON),
+      routeKm: Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2)),
+      waypointsCount: points.length,
+      waterPoints: points,
+      enrichedGpxText: combineToEnrichedGpx(routeFC, points, selectedRadiusMeters)
+    };
+    const resp = await fetch('/api/routes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   } catch (err) {
-    // Optionally: log or ignore errors
-    console.warn('[renderWaterMarkers] Failed to save route to /api/routes', err);
+    // Saving is best-effort telemetry; never block the user's map on it.
+    savedRouteForFile = false;
+    console.warn('[saveRoute] failed to save route', err);
   }
 }
 
@@ -503,6 +520,8 @@ function resetApp() {
     originalGpxText = '';
     foundWaterPoints = [];
     foundCoffeePoints = [];
+    currentRouteFilename = 'route.gpx';
+    savedRouteForFile = false;
     downloadBtn.disabled = true;
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
@@ -631,20 +650,28 @@ function download(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+/** Storage name for an upload; FIT routes are persisted as their GPX rendering. */
+function storageFilenameFor(file) {
+  const name = (file?.name || 'route.gpx').trim() || 'route.gpx';
+  return /\.fit$/i.test(name) ? name.replace(/\.fit$/i, '.gpx') : name;
+}
+
 async function handleRouteFile(file) {
   setError('');
   setStatus(`Parsing ${file.name} …`);
   const geojson = await parseRouteFile(file);
   renderRoute(geojson);
   currentRouteGeoJSON = geojson;
+  // A new file is a new route: allow exactly one save for it.
+  currentRouteFilename = storageFilenameFor(file);
+  savedRouteForFile = false;
   setStatus('Computing bounding box …');
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
   try {
     const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
     setStatus(`Querying ${backend} for water points …`);
-    let results = [];
-    results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
+    const results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
       setStatus(`Querying ${backend} for water points … (${done})`);
     }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000, source: 'overpass' });
     foundWaterPoints = results;
@@ -652,6 +679,8 @@ async function handleRouteFile(file) {
     renderWaterMarkers(near, true);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
+    // Save once, after the route is on screen, and never block rendering on it.
+    saveRoute(near);
   } catch (e) {
     console.error(e);
     setError(e.message || String(e));
@@ -679,10 +708,7 @@ downloadBtn.addEventListener('click', async () => {
   try {
     if (!routeLayer) return;
     await ensureToGpxAvailable();
-    // Reconstruct route GeoJSON from displayed layer for robustness
-    const routeGeo = routeLayer.toGeoJSON();
-    const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
-    const gpx = combineToEnrichedGpx(routeFC, foundWaterPoints, selectedRadiusMeters);
+    const gpx = combineToEnrichedGpx(currentRouteAsFeatureCollection(), foundWaterPoints, selectedRadiusMeters);
     download('enriched.gpx', gpx);
   } catch (e) {
     setError(e.message || String(e));
@@ -704,9 +730,8 @@ if (radiusSelect) {
     setStatus(`Updating results for ${selectedRadiusMeters} m …`);
     showLoading(true);
     try {
-      const routeGeo = routeLayer.toGeoJSON();
-      const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
-      let msgs = [];
+      const routeFC = currentRouteAsFeatureCollection();
+      const msgs = [];
       if (foundWaterPoints.length) {
         const nearW = sortPointsByDistance(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters));
         renderWaterMarkers(nearW, true);
@@ -741,8 +766,7 @@ if (navCoffeeBtn) {
     try {
       setError('');
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
-      const routeGeo = routeLayer.toGeoJSON();
-      const routeFC = routeGeo.type === 'FeatureCollection' ? routeGeo : { type: 'FeatureCollection', features: [routeGeo] };
+      const routeFC = currentRouteAsFeatureCollection();
       const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus('Querying Overpass for coffee …');
       showLoading(true);
