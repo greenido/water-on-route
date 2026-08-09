@@ -103,6 +103,49 @@ function validateTileCoordinates(zValue, xValue, yValue) {
   return { z, x, y };
 }
 
+/**
+ * Reduce a client IP to a coarse network before it is stored.
+ *
+ * A GPX track already reveals where someone rides; pairing it with a full IP
+ * makes the pair directly identifying. Dropping the host portion keeps the
+ * value useful for coarse traffic analysis without pinning it to a household:
+ * IPv4 keeps the /24, IPv6 keeps the /48.
+ *
+ * @param {string|null|undefined} ip
+ * @returns {string|null} anonymized IP, or null when the input is not an IP
+ */
+function anonymizeIp(ip) {
+  if (typeof ip !== 'string') return null;
+  let value = ip.trim();
+  if (!value) return null;
+
+  // Normalize IPv4-mapped IPv6 (::ffff:203.0.113.45) to its IPv4 form.
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(value);
+  if (mapped) value = mapped[1];
+
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {
+    const octets = value.split('.');
+    if (octets.some((o) => Number(o) > 255)) return null;
+    return `${octets[0]}.${octets[1]}.${octets[2]}.0`;
+  }
+
+  if (value.includes(':')) {
+    // Expand the :: shorthand so we can reliably keep the first three hextets.
+    const [head, tail = ''] = value.split('::');
+    const headParts = head ? head.split(':').filter(Boolean) : [];
+    const tailParts = tail ? tail.split(':').filter(Boolean) : [];
+    const missing = 8 - headParts.length - tailParts.length;
+    if (missing < 0) return null;
+    const full = value.includes('::')
+      ? [...headParts, ...Array(missing).fill('0'), ...tailParts]
+      : value.split(':');
+    if (full.length !== 8) return null;
+    return `${full.slice(0, 3).join(':')}::`;
+  }
+
+  return null;
+}
+
 function isAllowedOrigin(origin, host) {
   if (!origin) return true;
   if (!host) return false;
@@ -142,5 +185,6 @@ module.exports = {
   validateTileCoordinates,
   isAllowedOrigin,
   normalizeHttpUrl,
-  positiveInteger
+  positiveInteger,
+  anonymizeIp
 };

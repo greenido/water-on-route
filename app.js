@@ -44,7 +44,28 @@ const errorEl = document.getElementById('error');
 let loadingEl = document.getElementById('loading');
 const downloadBtn = document.getElementById('downloadBtn');
 const radiusSelect = document.getElementById('radiusSelect');
+const saveRouteToggle = document.getElementById('saveRouteToggle');
 let selectedRadiusMeters = Number(radiusSelect?.value) || 150;
+
+// Whether the user lets us keep their route server-side. Remembered per device;
+// the checkbox in the HTML carries the default for a first-time visitor.
+const SAVE_ROUTE_PREF_KEY = 'wor.saveRoute';
+function readSaveRoutePreference() {
+  try {
+    const stored = localStorage.getItem(SAVE_ROUTE_PREF_KEY);
+    if (stored === 'true' || stored === 'false') return stored === 'true';
+  } catch (_) { /* private mode: fall through to the markup default */ }
+  return saveRouteToggle ? saveRouteToggle.checked : true;
+}
+let saveRouteEnabled = readSaveRoutePreference();
+if (saveRouteToggle) {
+  saveRouteToggle.checked = saveRouteEnabled;
+  saveRouteToggle.addEventListener('change', () => {
+    saveRouteEnabled = saveRouteToggle.checked;
+    try { localStorage.setItem(SAVE_ROUTE_PREF_KEY, String(saveRouteEnabled)); } catch (_) {}
+    showToast(saveRouteEnabled ? 'Routes will be saved on the server.' : 'Routes stay in your browser.');
+  });
+}
 // Top nav + help modal elements
 const navNewBtn = document.getElementById('navNewBtn');
 const navHelpBtn = document.getElementById('navHelpBtn');
@@ -377,6 +398,7 @@ function renderWaterMarkers(points, animate = false) {
  * @param {Array<object>} points near-route water points at the current radius
  */
 async function saveRoute(points) {
+  if (!saveRouteEnabled) return;
   if (savedRouteForFile) return;
   if (!currentRouteGeoJSON || !Array.isArray(points) || points.length === 0) return;
   if (!originalGpxText) return;
