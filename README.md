@@ -159,6 +159,7 @@ If you leave variables unset, sane defaults will be used:
 - `MAX_ROUTE_DB_BYTES`: refuse new uploads past this DB size (default `536870912`)
 - `OVERPASS_CACHE_TTL_MS`: how long a cached Overpass response stays fresh (default 6 h)
 - `OVERPASS_CACHE_MAX_ENTRIES` / `OVERPASS_CACHE_MAX_BYTES`: cache bounds (default `200` / 64 MB)
+- `DEBUG_DB`: per-operation SQLite tracing (default `false`)
 
 Copy `.env.example` to `.env` for the complete configuration template. Never
 commit `.env` or real credentials.
