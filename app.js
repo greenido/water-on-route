@@ -9,8 +9,8 @@
  *   - togpx (loaded on demand if not present)
  *
  * ESM imports:
- *   - fetchOSMWaterPointsAdaptive from ./osmApi.js
- *   - parseFitToGeoJSON from ./fitToGeoJSON.js
+ *   - fetchOSMWaterPointsAdaptive from ./osmApi.mjs
+ *   - parseFitToGeoJSON from ./fitToGeoJSON.mjs
  *
  * UX features:
  *   - Drag & drop or file picker for GPX / FIT
@@ -24,8 +24,13 @@ import {
   waterSubtypeLabel,
   rankCoffeePoints,
   sortPointsByDistance,
-} from './osmApi.js';
-import { parseFitToGeoJSON } from './fitToGeoJSON.js';
+} from './osmApi.mjs';
+import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
+import {
+  computeBBoxFromGeoJSON,
+  computeRouteLengthKm,
+  filterPointsNearRoute,
+} from './geo.mjs';
 
 // Basic UI elements
 const fileInput = document.getElementById('gpxFile');
@@ -231,32 +236,6 @@ function showLoading(show) {
   loadingEl.style.display = show ? 'grid' : 'none';
 }
 
-function computeBBoxFromGeoJSON(geojson) {
-  let minLat =  90, maxLat = -90, minLon =  180, maxLon = -180;
-  function update([lon, lat]) {
-    if (lat < minLat) minLat = lat;
-    if (lat > maxLat) maxLat = lat;
-    if (lon < minLon) minLon = lon;
-    if (lon > maxLon) maxLon = lon;
-  }
-  function walkCoords(coords) {
-    if (typeof coords[0] === 'number') {
-      update(coords);
-    } else {
-      for (const c of coords) walkCoords(c);
-    }
-  }
-  if (geojson.type === 'FeatureCollection') {
-    for (const f of geojson.features) {
-      const g = f.geometry;
-      if (g && g.coordinates) walkCoords(g.coordinates);
-    }
-  } else if (geojson.type && geojson.coordinates) {
-    walkCoords(geojson.coordinates);
-  }
-  return { minlat: minLat, minlon: minLon, maxlat: maxLat, maxlon: maxLon };
-}
-
 function fitMapToGeoJSON(geojson) {
   const bounds = [];
   function add([lon, lat]) { bounds.push([lat, lon]); }
@@ -270,85 +249,6 @@ function fitMapToGeoJSON(geojson) {
     }
   } else if (geojson.type && geojson.coordinates) { walk(geojson.coordinates); }
   if (bounds.length) map.fitBounds(bounds);
-}
-
-// Geometry helpers for proximity filtering
-const EARTH_RADIUS_M = 6378137;
-
-function lonLatToWebMercator(lon, lat) {
-  const x = EARTH_RADIUS_M * (lon * Math.PI / 180);
-  const y = EARTH_RADIUS_M * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
-  return [x, y];
-}
-
-function pointToSegmentDistanceMeters(p, a, b) {
-  // p, a, b are [lon, lat]
-  const [px, py] = lonLatToWebMercator(p[0], p[1]);
-  const [ax, ay] = lonLatToWebMercator(a[0], a[1]);
-  const [bx, by] = lonLatToWebMercator(b[0], b[1]);
-  const abx = bx - ax;
-  const aby = by - ay;
-  const apx = px - ax;
-  const apy = py - ay;
-  const abLen2 = abx * abx + aby * aby || 1; // avoid div by 0
-  let t = (apx * abx + apy * aby) / abLen2;
-  t = Math.max(0, Math.min(1, t));
-  const cx = ax + t * abx;
-  const cy = ay + t * aby;
-  const dx = px - cx;
-  const dy = py - cy;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function minDistancePointToLineStringMeters(pointLonLat, lineCoordsLonLat) {
-  let min = Infinity;
-  for (let i = 1; i < lineCoordsLonLat.length; i++) {
-    const d = pointToSegmentDistanceMeters(pointLonLat, lineCoordsLonLat[i - 1], lineCoordsLonLat[i]);
-    if (d < min) min = d;
-  }
-  return min;
-}
-
-function extractRouteLineStrings(geojson) {
-  const lines = [];
-  function addLine(coords) { if (coords && coords.length >= 2) lines.push(coords); }
-  function walkGeometry(geom) {
-    if (!geom) return;
-    if (geom.type === 'LineString') addLine(geom.coordinates);
-    else if (geom.type === 'MultiLineString') {
-      for (const ls of geom.coordinates) addLine(ls);
-    } else if (geom.type === 'GeometryCollection') {
-      for (const g of geom.geometries || []) walkGeometry(g);
-    }
-  }
-  if (geojson.type === 'FeatureCollection') {
-    for (const f of geojson.features) walkGeometry(f.geometry);
-  } else if (geojson.type && geojson.coordinates) {
-    walkGeometry(geojson);
-  }
-  return lines;
-}
-
-function filterPointsNearRoute(geojsonRoute, points, maxMeters) {
-  const lineStrings = extractRouteLineStrings(geojsonRoute);
-  if (!lineStrings.length) return [];
-  const result = [];
-  for (const p of points) {
-    const lat = p.lat ?? p.center?.lat;
-    const lon = p.lon ?? p.center?.lon;
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-    const pt = [lon, lat];
-    let min = Infinity;
-    for (const ls of lineStrings) {
-      const d = minDistancePointToLineStringMeters(pt, ls);
-      if (d < min) min = d;
-      if (min <= maxMeters) break;
-    }
-    if (min <= maxMeters) {
-      result.push({ ...p, _distanceM: min });
-    }
-  }
-  return result;
 }
 
 function renderRoute(geojson) {
@@ -448,10 +348,8 @@ async function renderWaterMarkers(points, animate = false) {
     // Only attempt if we have a route and water points
     if (typeof currentRouteGeoJSON !== 'undefined' && currentRouteGeoJSON && Array.isArray(points) && points.length > 0) {
       // Compute bbox and route length if possible
-      const bbox = computeBBoxFromGeoJSON ? computeBBoxFromGeoJSON(currentRouteGeoJSON) : null;
-      const routeKm = (window.computeRouteLengthKm && typeof window.computeRouteLengthKm === 'function')
-        ? window.computeRouteLengthKm(currentRouteGeoJSON)
-        : null;
+      const bbox = computeBBoxFromGeoJSON(currentRouteGeoJSON);
+      const routeKm = Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2));
       // Try to get the original GPX text if available
       const gpxText = typeof originalGpxText !== 'undefined' ? originalGpxText : null;
       // Compose filename if possible (FIT uploads are stored as GPX text)

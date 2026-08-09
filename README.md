@@ -70,7 +70,7 @@ Notes:
 
 ## How it works
 
-- Frontend (`index.html`, `app.js`, `osmApi.js`)
+- Frontend (`index.html`, `app.js`, `osmApi.mjs`)
   - Renders a Leaflet map and your GPX route
   - Computes a bounding box for the route
   - Queries Overpass for potable water: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`, `amenity=water_point`, potable `amenity=fountain` / `man_made=water_well`, and `drinking_water=yes|compatible` (excludes `drinking_water=no`)
@@ -96,7 +96,7 @@ Notes:
 water-on-route/
 ├─ index.html          # UI and client config (window.WOR_CONFIG)
 ├─ app.js              # Map, GPX handling, Overpass querying, GPX export
-├─ osmApi.js           # Small OSM/Overpass utilities with adaptive splitting
+├─ osmApi.mjs          # Small OSM/Overpass utilities with adaptive splitting
 ├─ styles.css          # Basic styles
 ├─ routes/
 │  └─ losAltos-MorganHill.gpx  # Example route
@@ -192,7 +192,7 @@ Implementation notes:
 The Express server exposes a few endpoints:
 
 - `GET /` – serves `index.html`
-- `GET /app.js`, `GET /styles.css`, `GET /osmApi.js`, `GET /test.html` – static assets
+- `GET /app.js`, `GET /styles.css`, `GET /osmApi.mjs`, `GET /test.html` – static assets
 - `GET /health` – simple health check
 - `POST /api/overpass` – Overpass proxy
   - Accepts either `application/json` with `{ query: "..." }` or `application/x-www-form-urlencoded` with `data=...`

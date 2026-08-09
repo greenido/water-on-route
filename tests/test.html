@@ -26,7 +26,7 @@
         dedupePointsByTypeId,
         rankCoffeePoints,
         coffeeQualityBoost,
-      } from './osmApi.js';
+      } from './osmApi.mjs';
 
       const out = document.getElementById('out');
       function log(status, name, message) {
@@ -174,7 +174,7 @@
       }
 
       async function testFitToGeoJSON() {
-        const { parseFitToGeoJSON, fitDataToGeoJSON, coordinatesFromFitPoints } = await import('./fitToGeoJSON.js');
+        const { parseFitToGeoJSON, fitDataToGeoJSON, coordinatesFromFitPoints } = await import('./fitToGeoJSON.mjs');
 
         const coords = coordinatesFromFitPoints([
           { position_lat: 37.1, position_long: -122.1, altitude: 10 },
