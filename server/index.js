@@ -35,8 +35,20 @@ const { rateLimit } = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
-const { initDatabase, insertRoute, listRoutes, getRouteById, deleteRouteById, DB_PATH } = require('./db');
-const archiver = require('archiver');
+const {
+  initDatabase,
+  insertRoute,
+  listRoutes,
+  listRouteIds,
+  countRoutes,
+  getRouteById,
+  deleteRouteById,
+  DB_PATH
+} = require('./db');
+// archiver 8 dropped the callable default export in favour of named classes,
+// which left `archiver('zip', ...)` throwing "archiver is not a function" and
+// the admin "Download all" button returning 500.
+const { ZipArchive } = require('archiver');
 const crypto = require('crypto');
 const {
   safeEqual,
@@ -289,11 +301,14 @@ app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res)
   }
 });
 
-// API: List routes (protected)
-app.get('/api/routes', adminLimiter, requireBasicAuth, async (_req, res) => {
+// API: List routes (protected). Paged: ?limit= (max 1000) &offset=
+app.get('/api/routes', adminLimiter, requireBasicAuth, async (req, res) => {
   try {
-    const rows = await listRoutes();
-    return res.json({ ok: true, routes: rows });
+    const [page, total] = await Promise.all([
+      listRoutes({ limit: req.query.limit, offset: req.query.offset }),
+      countRoutes()
+    ]);
+    return res.json({ ok: true, total, ...page });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Failed to list routes' });
@@ -441,13 +456,13 @@ app.get('/api/admin/db.sqlite3', adminLimiter, requireBasicAuth, async (_req, re
 
 app.get('/api/routes/all.zip', adminLimiter, requireBasicAuth, async (_req, res) => {
   try {
-    const routes = await listRoutes();
+    const ids = await listRouteIds();
     const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
     const fname = `routes-${ts}.zip`;
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
+    const archive = new ZipArchive({ zlib: { level: 9 } });
     archive.on('warning', (err) => {
       console.warn('[GET /api/routes/all.zip] warning', err);
     });
@@ -458,9 +473,11 @@ app.get('/api/routes/all.zip', adminLimiter, requireBasicAuth, async (_req, res)
     });
     archive.pipe(res);
 
-    for (const r of routes) {
+    // One route in memory at a time: the ids come from a cheap id-only query
+    // and each GPX is appended and released before the next is read.
+    for (const id of ids) {
       try {
-        const full = await getRouteById(r.id);
+        const full = await getRouteById(id);
         if (!full) continue;
         const baseSafe = (full.filename && full.filename.replace(/[^a-zA-Z0-9_.-]+/g, '_').replace(/\.gpx$/i, '')) || `route-${full.id}`;
         if (full.gpxText) {
@@ -470,7 +487,7 @@ app.get('/api/routes/all.zip', adminLimiter, requireBasicAuth, async (_req, res)
           archive.append(full.enrichedGpxText, { name: `${baseSafe}-enriched.gpx` });
         }
       } catch (e) {
-        console.warn('[GET /api/routes/all.zip] skipping route due to error', { id: r.id, error: e && e.message });
+        console.warn('[GET /api/routes/all.zip] skipping route due to error', { id, error: e && e.message });
       }
     }
 
@@ -530,9 +547,16 @@ app.get('/admin', adminLimiter, requireBasicAuth, (req, res) => {
     <script nonce="${nonce}">
       document.addEventListener('DOMContentLoaded', async () => {
         try {
-          const resp = await fetch('/api/routes', { headers: { 'Accept': 'application/json' } });
+          const resp = await fetch('/api/routes?limit=1000', { headers: { 'Accept': 'application/json' } });
           const data = await resp.json();
           const routes = (data && data.routes) || [];
+          const total = (data && data.total) || routes.length;
+          if (total > routes.length) {
+            const note = document.createElement('p');
+            note.className = 'text-slate-400 text-sm mb-2';
+            note.textContent = 'Showing the newest ' + routes.length + ' of ' + total + ' routes.';
+            document.querySelector('.card').before(note);
+          }
           const tbody = document.querySelector('#routesTable tbody');
           const ipLocCache = new Map();
 

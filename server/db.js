@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
+const { clampListLimit, clampListOffset } = require('./pagination');
 
 // Prefer project data directory in development, and /data in production (Fly volumes)
 const PROJECT_DATA_DIR = path.join(__dirname, '..', 'data');
@@ -129,6 +130,9 @@ function migrateSchema() {
       if (!cols.has('client_ip')) migrations.push(`ALTER TABLE routes ADD COLUMN client_ip TEXT`);
       if (!cols.has('water_points_json')) migrations.push(`ALTER TABLE routes ADD COLUMN water_points_json TEXT`);
       if (!cols.has('enriched_gpx_text')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_gpx_text TEXT`);
+      // The listing always sorts by uploaded_at; without this every page is a
+      // full scan plus a sort of the whole table.
+      migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_uploaded_at ON routes (uploaded_at DESC, id DESC)`);
       if (migrations.length === 0) {
         const elapsedMs = Date.now() - startTime;
         console.debug('[db.migrateSchema] no migrations needed', { elapsedMs });
@@ -168,17 +172,40 @@ function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxTex
   });
 }
 
-function listRoutes() {
-  const startTime = Date.now();
-  console.debug('[db.listRoutes] start');
+function countRoutes() {
   return new Promise((resolve, reject) => {
-    db.all(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, uploaded_at, client_ip, enriched_gpx_text FROM routes ORDER BY uploaded_at DESC`, [], (err, rows) => {
-      if (err) {
-        const elapsedMs = Date.now() - startTime;
-        console.error('[db.listRoutes] failed', { elapsedMs, error: err });
-        return reject(err);
-      }
-      try {
+    db.get(`SELECT count(*) AS total FROM routes`, [], (err, row) => {
+      if (err) return reject(err);
+      resolve(row ? row.total : 0);
+    });
+  });
+}
+
+/**
+ * Page of route metadata, newest first.
+ *
+ * Deliberately does not select gpx_text or enriched_gpx_text: the list only
+ * needs to know whether an enriched version exists, and pulling the column to
+ * compute a boolean read 15.7 MB to produce 1 KB of output on a 20-row table.
+ * SQLite answers `IS NOT NULL` from the record header instead.
+ */
+function listRoutes({ limit, offset } = {}) {
+  const startTime = Date.now();
+  const pageSize = clampListLimit(limit);
+  const skip = clampListOffset(offset);
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT id, filename, file_size, bbox, route_km, waypoints_count, uploaded_at, client_ip,
+              enriched_gpx_text IS NOT NULL AS has_enriched
+       FROM routes
+       ORDER BY uploaded_at DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [pageSize, skip],
+      (err, rows) => {
+        if (err) {
+          console.error('[db.listRoutes] failed', { elapsedMs: Date.now() - startTime, error: err });
+          return reject(err);
+        }
         const mapped = rows.map(r => ({
           id: r.id,
           filename: r.filename,
@@ -188,16 +215,23 @@ function listRoutes() {
           waypointsCount: r.waypoints_count,
           uploadedAt: r.uploaded_at,
           clientIp: r.client_ip || null,
-          hasEnriched: !!r.enriched_gpx_text
+          hasEnriched: !!r.has_enriched
         }));
-        const elapsedMs = Date.now() - startTime;
-        console.debug('[db.listRoutes] success', { count: mapped.length, elapsedMs });
-        resolve(mapped);
-      } catch (e) {
-        const elapsedMs = Date.now() - startTime;
-        console.warn('[db.listRoutes] mapping failed, returning raw rows', { elapsedMs, error: e });
-        resolve(rows);
+        resolve({ routes: mapped, limit: pageSize, offset: skip });
       }
+    );
+  });
+}
+
+/**
+ * Ids only, oldest first, for streaming exports that must not hold every
+ * route in memory at once.
+ */
+function listRouteIds() {
+  return new Promise((resolve, reject) => {
+    db.all(`SELECT id FROM routes ORDER BY id ASC`, [], (err, rows) => {
+      if (err) return reject(err);
+      resolve(rows.map(r => r.id));
     });
   });
 }
@@ -237,17 +271,12 @@ function getRouteById(id) {
   });
 }
 
+// Called once per row per listing; logging here made a page load emit hundreds
+// of lines and timed JSON.parse of a few hundred bytes.
 function safeParseJson(txt) {
-  const startTime = Date.now();
-  console.debug('[db.safeParseJson] start');
   try {
-    const parsed = JSON.parse(txt);
-    const elapsedMs = Date.now() - startTime;
-    console.debug('[db.safeParseJson] success', { elapsedMs });
-    return parsed;
-  } catch (err) {
-    const elapsedMs = Date.now() - startTime;
-    console.warn('[db.safeParseJson] failed', { elapsedMs, error: err });
+    return JSON.parse(txt);
+  } catch {
     return null;
   }
 }
@@ -275,6 +304,8 @@ module.exports = {
   initDatabase,
   insertRoute,
   listRoutes,
+  listRouteIds,
+  countRoutes,
   getRouteById,
   deleteRouteById
 };
