@@ -11,6 +11,10 @@ import {
   filterPointsNearRoute,
   buildRouteIndex,
   distanceToRouteMeters,
+  nearestOnRoute,
+  sortPointsAlongRoute,
+  longestDryStretch,
+  elevationProfile,
   computeBBoxFromGeoJSON,
   computeRouteLengthKm,
   pointLonLat
@@ -267,4 +271,156 @@ test('computeRouteLengthKm ignores elevation in the third ordinate', () => {
   const flat = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[0, 0], [0, 1]] } }] };
   const withElev = { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[0, 0, 100], [0, 1, 900]] } }] };
   assert.equal(computeRouteLengthKm(flat), computeRouteLengthKm(withElev));
+});
+
+/** A straight due-north route of the given length, one vertex per 100 m. */
+function northRoute(km, lon = -122, lat0 = 37, withElevation = false) {
+  const metresPerDeg = haversineMeters([lon, lat0], [lon, lat0 + 1]);
+  const steps = Math.round(km * 10);
+  const coords = [];
+  for (let i = 0; i <= steps; i++) {
+    const lat = lat0 + (i * 100) / metresPerDeg;
+    coords.push(withElevation ? [lon, lat, 100 + i] : [lon, lat]);
+  }
+  return {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }]
+  };
+}
+
+test('buildRouteIndex measures total route length', () => {
+  const index = buildRouteIndex(northRoute(10));
+  assert.ok(Math.abs(index.totalM - 10000) < 20, `got ${index.totalM} m`);
+});
+
+test('nearestOnRoute reports how far along the route the match sits', () => {
+  const route = northRoute(20);
+  const index = buildRouteIndex(route);
+  const metresPerDeg = haversineMeters([-122, 37], [-122, 38]);
+
+  for (const targetKm of [0, 2.5, 10, 19.9]) {
+    const lat = 37 + (targetKm * 1000) / metresPerDeg;
+    const nearest = nearestOnRoute(index, [-122, lat]);
+    assert.ok(Math.abs(nearest.alongM / 1000 - targetKm) < 0.05,
+      `expected km ${targetKm}, got ${(nearest.alongM / 1000).toFixed(3)}`);
+  }
+});
+
+test('a point beside the route keeps its along-distance and its offset', () => {
+  const index = buildRouteIndex(northRoute(10));
+  const metresPerDeg = haversineMeters([-122, 37], [-122, 38]);
+  const lat = 37 + 5000 / metresPerDeg;
+  // Nudge east so it is off the line but level with km 5.
+  const nearest = nearestOnRoute(index, [-122 + 0.001, lat]);
+  assert.ok(Math.abs(nearest.alongM / 1000 - 5) < 0.05);
+  assert.ok(nearest.distanceM > 50 && nearest.distanceM < 120, `offset ${nearest.distanceM}`);
+});
+
+test('along-distance accumulates across multiple track segments', () => {
+  const metresPerDeg = haversineMeters([-122, 37], [-122, 38]);
+  const seg = (fromKm, toKm) => {
+    const coords = [];
+    for (let km = fromKm; km <= toKm; km += 0.1) coords.push([-122, 37 + (km * 1000) / metresPerDeg]);
+    return { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } };
+  };
+  const index = buildRouteIndex({ type: 'FeatureCollection', features: [seg(0, 5), seg(5, 9)] });
+  assert.ok(Math.abs(index.totalM - 9000) < 60, `total ${index.totalM}`);
+  const nearest = nearestOnRoute(index, [-122, 37 + (7000) / metresPerDeg]);
+  assert.ok(Math.abs(nearest.alongM / 1000 - 7) < 0.1, `got ${(nearest.alongM / 1000).toFixed(2)} km`);
+});
+
+test('filterPointsNearRoute annotates _alongKm as well as _distanceM', () => {
+  const route = northRoute(10);
+  const metresPerDeg = haversineMeters([-122, 37], [-122, 38]);
+  const kept = filterPointsNearRoute(route, [
+    { id: 'a', lon: -122, lat: 37 + 8000 / metresPerDeg },
+    { id: 'b', lon: -122, lat: 37 + 2000 / metresPerDeg }
+  ], 200);
+  assert.equal(kept.length, 2);
+  assert.ok(Math.abs(kept.find(p => p.id === 'a')._alongKm - 8) < 0.05);
+  assert.ok(Math.abs(kept.find(p => p.id === 'b')._alongKm - 2) < 0.05);
+});
+
+test('sortPointsAlongRoute returns ride order, not proximity order', () => {
+  const points = [
+    { id: 'far-along-but-close', _alongKm: 80, _distanceM: 5 },
+    { id: 'early-but-distant', _alongKm: 3, _distanceM: 190 },
+    { id: 'middle', _alongKm: 40, _distanceM: 100 }
+  ];
+  assert.deepEqual(sortPointsAlongRoute(points).map(p => p.id),
+    ['early-but-distant', 'middle', 'far-along-but-close']);
+  // and does not mutate
+  assert.equal(points[0].id, 'far-along-but-close');
+});
+
+test('sortPointsAlongRoute puts unpositioned points last', () => {
+  const out = sortPointsAlongRoute([{ id: 1 }, { id: 2, _alongKm: 4 }]);
+  assert.deepEqual(out.map(p => p.id), [2, 1]);
+});
+
+test('longestDryStretch measures the gap between consecutive stops', () => {
+  const dry = longestDryStretch(100, [
+    { _alongKm: 10 }, { _alongKm: 20 }, { _alongKm: 65 }, { _alongKm: 70 }
+  ]);
+  assert.equal(dry.gapKm, 45);
+  assert.equal(dry.startKm, 20);
+  assert.equal(dry.endKm, 65);
+  assert.equal(dry.count, 4);
+});
+
+test('longestDryStretch counts the run-in from the start', () => {
+  // Nothing until km 60 is the worst gap even though later stops are close.
+  const dry = longestDryStretch(100, [{ _alongKm: 60 }, { _alongKm: 65 }, { _alongKm: 95 }]);
+  assert.equal(dry.gapKm, 60);
+  assert.equal(dry.startKm, 0);
+  assert.equal(dry.endKm, 60);
+});
+
+test('longestDryStretch counts the run-out to the finish', () => {
+  const dry = longestDryStretch(100, [{ _alongKm: 5 }, { _alongKm: 30 }]);
+  assert.equal(dry.gapKm, 70);
+  assert.equal(dry.startKm, 30);
+  assert.equal(dry.endKm, 100);
+});
+
+test('longestDryStretch treats a route with no water as entirely dry', () => {
+  const dry = longestDryStretch(80, []);
+  assert.deepEqual(dry, { gapKm: 80, startKm: 0, endKm: 80, count: 0 });
+});
+
+test('longestDryStretch tolerates unsorted input and missing positions', () => {
+  const unsorted = longestDryStretch(100, [{ _alongKm: 70 }, { _alongKm: 10 }, { _alongKm: 20 }]);
+  assert.equal(unsorted.gapKm, 50);
+  assert.equal(unsorted.startKm, 20);
+
+  const withJunk = longestDryStretch(100, [{ _alongKm: 10 }, { }, { _alongKm: NaN }, { _alongKm: 20 }]);
+  assert.equal(withJunk.count, 2);
+  assert.equal(withJunk.gapKm, 80);
+});
+
+test('longestDryStretch degrades safely on a zero-length route', () => {
+  assert.deepEqual(longestDryStretch(0, [{ _alongKm: 1 }]), { gapKm: 0, startKm: 0, endKm: 0, count: 1 });
+  assert.equal(longestDryStretch(NaN, []).gapKm, 0);
+});
+
+test('elevationProfile pairs elevation with distance along the route', () => {
+  const profile = elevationProfile(buildRouteIndex(northRoute(5, -122, 37, true)));
+  assert.ok(profile.length >= 2);
+  assert.equal(profile[0].km, 0);
+  assert.equal(profile[0].ele, 100);
+  assert.ok(profile[profile.length - 1].km > 4.9);
+  assert.ok(profile.every(s => Number.isFinite(s.km) && Number.isFinite(s.ele)));
+});
+
+test('elevationProfile returns nothing when the route carries no elevation', () => {
+  assert.deepEqual(elevationProfile(buildRouteIndex(northRoute(5))), []);
+  assert.deepEqual(elevationProfile(null), []);
+});
+
+test('elevationProfile downsamples long routes but keeps the endpoints', () => {
+  const index = buildRouteIndex(northRoute(200, -122, 37, true)); // 2001 vertices
+  const profile = elevationProfile(index, 100);
+  assert.ok(profile.length <= 101, `got ${profile.length} samples`);
+  assert.equal(profile[0].km, 0);
+  assert.ok(profile[profile.length - 1].km > 199);
 });

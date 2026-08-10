@@ -12,7 +12,10 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 - Interactive map with your route, water markers, and optional coffee markers
 - Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
 - Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits (water and coffee)
-- One-click download of an enriched `.gpx` including water waypoints
+- Water points reported by position along the route (km 47), not just how far off it they sit
+- Longest dry stretch called out, including the run-in from the start and run-out to the finish
+- Elevation strip under the map with a tick per water point and the dry stretch shaded
+- One-click download of an enriched `.gpx` whose waypoints are named `km 47.0 — Fountain`
 - Local proxy for Overpass and tiles to avoid CORS and respect usage policies
 - Optional Docker stack to run Overpass and a local raster tile server
 - Save uploaded routes to SQLite and review them in an admin table
