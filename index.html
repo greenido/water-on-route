@@ -11,13 +11,19 @@
   <link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body class="bg-slate-950 text-slate-100 md:h-screen md:flex md:flex-col">
-  <header class="shrink-0 px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between">
-    <h1 class="m-0 text-lg tracking-wide font-semibold">💧GPX Water Mapper</h1>
-    <nav class="flex items-center gap-2">
-      <button id="navNewBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🧹 <span>Clean map</span></button>
-      <button id="navCoffeeBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2" title="Search coffee along the route">☕ <span>Search coffee</span></button>
-      <a href="https://greenido.github.io/weather-4-bike/" target="_blank" rel="noopener" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⛅ <span>Weather</span></a>
-      <button id="navHelpBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">❓ <span>Help</span></button>
+  <!-- Below ~640px the four labelled buttons plus the title do not fit on one
+       line: the title wrapped to three lines and Help fell off the right edge,
+       leaving the page scrolling sideways. The labels collapse to their icons
+       there (below the layout breakpoint, where they would still wrap), with
+       aria-label carrying the name once the text is hidden. The title truncates
+       so the controls always win the space. -->
+  <header class="shrink-0 px-3 sm:px-4 py-3 sm:py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between gap-2">
+    <h1 class="m-0 text-base sm:text-lg tracking-wide font-semibold truncate min-w-0">💧GPX Water Mapper</h1>
+    <nav class="flex items-center gap-1.5 sm:gap-2 shrink-0">
+      <button id="navNewBtn" aria-label="Clean map" title="Clean map" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🧹 <span class="hidden md:inline">Clean map</span></button>
+      <button id="navCoffeeBtn" aria-label="Search coffee along the route" title="Search coffee along the route" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">☕ <span class="hidden md:inline">Search coffee</span></button>
+      <a href="https://greenido.github.io/weather-4-bike/" target="_blank" rel="noopener" aria-label="Weather along your route" title="Weather along your route" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⛅ <span class="hidden md:inline">Weather</span></a>
+      <button id="navHelpBtn" aria-label="Help" title="Help" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">❓ <span class="hidden md:inline">Help</span></button>
     </nav>
   </header>
 
