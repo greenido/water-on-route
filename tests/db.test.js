@@ -45,3 +45,16 @@ test('clampListOffset passes through a valid offset', () => {
   assert.equal(clampListOffset(200), 200);
   assert.equal(clampListOffset('400'), 400);
 });
+
+test('DEBUG_DB tracing does not recurse into itself', () => {
+  // Regression: a search-and-replace that routed console.debug through a
+  // debugLog helper also rewrote the helper's own body, so enabling
+  // DEBUG_DB=true made every traced call overflow the stack.
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '..', 'server', 'db.js'),
+    'utf8'
+  );
+  const definition = source.match(/const debugLog = .*/)[0];
+  assert.ok(definition.includes('console.debug'), `debugLog must call console.debug, got: ${definition}`);
+  assert.ok(!/const debugLog = .*=> debugLog\(/.test(definition), 'debugLog must not call itself');
+});
