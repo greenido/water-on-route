@@ -27,7 +27,6 @@ import {
   fetchOSMCoffeePointsAdaptive,
   waterSubtypeLabel,
   rankCoffeePoints,
-  sortPointsByDistance,
 } from './osmApi.mjs';
 import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
 import {
@@ -35,6 +34,9 @@ import {
   computeRouteLengthKm,
   filterPointsNearRoute,
   buildRouteIndex,
+  sortPointsAlongRoute,
+  longestDryStretch,
+  elevationProfile,
 } from './geo.mjs';
 
 // Basic UI elements
@@ -46,6 +48,15 @@ let loadingEl = document.getElementById('loading');
 const downloadBtn = document.getElementById('downloadBtn');
 const radiusSelect = document.getElementById('radiusSelect');
 const saveRouteToggle = document.getElementById('saveRouteToggle');
+const summaryEl = document.getElementById('summary');
+const summaryDistanceEl = document.getElementById('summaryDistance');
+const summaryCountEl = document.getElementById('summaryCount');
+const dryStretchEl = document.getElementById('dryStretch');
+const dryStretchValueEl = document.getElementById('dryStretchValue');
+const waterListEl = document.getElementById('waterList');
+const profilePanel = document.getElementById('profilePanel');
+const profileSvg = document.getElementById('profile');
+const profileHint = document.getElementById('profileHint');
 let selectedRadiusMeters = Number(radiusSelect?.value) || 150;
 
 // Whether the user lets us keep their route server-side. Remembered per device;
@@ -207,6 +218,7 @@ let currentRouteFilename = 'route.gpx';
 let savedRouteForFile = false;
 // Route projected once per file; radius changes and exports reuse it.
 let currentRouteIndex = null;
+let currentRouteKm = 0;
 
 // Layers control: allow switching base maps and toggling overlays
 layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
@@ -325,6 +337,132 @@ function currentRouteAsFeatureCollection() {
     : { type: 'FeatureCollection', features: [routeGeo] };
 }
 
+/** One decimal below 100 km, whole numbers above; nobody plans to 10 metres. */
+function formatKm(km) {
+  if (!Number.isFinite(km)) return '—';
+  return km >= 100 ? String(Math.round(km)) : km.toFixed(1);
+}
+
+/**
+ * Colour the dry-stretch callout by how much trouble it represents.
+ * Thresholds are deliberately conservative: 25 km is roughly an hour of
+ * riding, which is about as long as one bottle lasts in the heat.
+ */
+function dryStretchSeverity(gapKm) {
+  if (gapKm >= 40) return { tone: 'border-red-500/50 bg-red-500/10 text-red-200', note: 'carry extra' };
+  if (gapKm >= 25) return { tone: 'border-amber-500/50 bg-amber-500/10 text-amber-200', note: 'top up before it' };
+  return { tone: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200', note: 'comfortable' };
+}
+
+/** Sidebar summary: distance, count, worst gap, and the stops in ride order. */
+function renderSummary(points) {
+  if (!summaryEl) return;
+  if (!currentRouteIndex || currentRouteIndex.isEmpty) {
+    summaryEl.hidden = true;
+    return;
+  }
+  summaryEl.hidden = false;
+  summaryDistanceEl.textContent = `${formatKm(currentRouteKm)} km`;
+  summaryCountEl.textContent = String(points.length);
+
+  const dry = longestDryStretch(currentRouteKm, points);
+  const severity = dryStretchSeverity(dry.gapKm);
+  dryStretchEl.className = `rounded-md border px-3 py-2 text-sm ${severity.tone}`;
+  dryStretchValueEl.textContent = points.length
+    ? `${formatKm(dry.gapKm)} km — km ${formatKm(dry.startKm)} to ${formatKm(dry.endKm)} (${severity.note})`
+    : `${formatKm(dry.gapKm)} km — no water found on this route`;
+
+  waterListEl.replaceChildren();
+  for (const p of points) {
+    const li = document.createElement('li');
+    li.className = 'flex items-baseline gap-2 text-slate-300';
+    const km = document.createElement('span');
+    km.className = 'tabular-nums text-slate-400 w-16 shrink-0';
+    km.textContent = Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : '—';
+    const label = document.createElement('span');
+    label.className = 'truncate';
+    label.textContent = (p.tags && (p.tags.name || p.tags.description)) || waterSubtypeLabel(p.tags);
+    li.append(km, label);
+    waterListEl.appendChild(li);
+  }
+}
+
+/**
+ * Compact elevation strip with a tick for every water point.
+ *
+ * Drawn as inline SVG in a fixed 1000x100 viewBox and stretched to the panel
+ * width, so there is no canvas sizing to keep in sync with layout.
+ */
+function renderProfile(points) {
+  if (!profilePanel || !profileSvg) return;
+  const samples = currentRouteIndex ? elevationProfile(currentRouteIndex) : [];
+  const totalKm = currentRouteKm;
+  if (!totalKm || samples.length < 2) {
+    profilePanel.hidden = true;
+    return;
+  }
+  profilePanel.hidden = false;
+
+  const W = 1000, H = 100, PAD = 6;
+  const eles = samples.map(s => s.ele);
+  const minEle = Math.min(...eles);
+  const maxEle = Math.max(...eles);
+  const span = maxEle - minEle || 1;
+  const xAt = (km) => Math.max(0, Math.min(W, (km / totalKm) * W));
+  const yAt = (ele) => H - PAD - ((ele - minEle) / span) * (H - PAD * 2);
+
+  profileSvg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const ns = 'http://www.w3.org/2000/svg';
+  const parts = [];
+
+  const area = document.createElementNS(ns, 'path');
+  const line = samples.map((s, i) => `${i ? 'L' : 'M'}${xAt(s.km).toFixed(1)},${yAt(s.ele).toFixed(1)}`).join('');
+  area.setAttribute('d', `${line}L${W},${H}L0,${H}Z`);
+  area.setAttribute('fill', 'rgba(56,189,248,0.15)');
+  parts.push(area);
+
+  const stroke = document.createElementNS(ns, 'path');
+  stroke.setAttribute('d', line);
+  stroke.setAttribute('fill', 'none');
+  stroke.setAttribute('stroke', '#38bdf8');
+  stroke.setAttribute('stroke-width', '1.5');
+  stroke.setAttribute('vector-effect', 'non-scaling-stroke');
+  parts.push(stroke);
+
+  // Shade the worst gap so it reads at a glance.
+  const dry = longestDryStretch(totalKm, points);
+  if (dry.gapKm > 0 && points.length) {
+    const band = document.createElementNS(ns, 'rect');
+    band.setAttribute('x', String(xAt(dry.startKm)));
+    band.setAttribute('y', '0');
+    band.setAttribute('width', String(Math.max(1, xAt(dry.endKm) - xAt(dry.startKm))));
+    band.setAttribute('height', String(H));
+    band.setAttribute('fill', dry.gapKm >= 25 ? 'rgba(248,113,113,0.16)' : 'rgba(148,163,184,0.10)');
+    parts.unshift(band);
+  }
+
+  for (const p of points) {
+    if (!Number.isFinite(p._alongKm)) continue;
+    const x = xAt(p._alongKm);
+    const tick = document.createElementNS(ns, 'line');
+    tick.setAttribute('x1', String(x));
+    tick.setAttribute('x2', String(x));
+    tick.setAttribute('y1', '0');
+    tick.setAttribute('y2', String(H));
+    tick.setAttribute('stroke', '#22d3ee');
+    tick.setAttribute('stroke-width', '1');
+    tick.setAttribute('vector-effect', 'non-scaling-stroke');
+    tick.setAttribute('opacity', '0.85');
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = `km ${formatKm(p._alongKm)} — ${(p.tags && p.tags.name) || waterSubtypeLabel(p.tags)}`;
+    tick.appendChild(title);
+    parts.push(tick);
+  }
+
+  profileSvg.replaceChildren(...parts);
+  profileHint.textContent = `${Math.round(minEle)}–${Math.round(maxEle)} m · ${formatKm(totalKm)} km`;
+}
+
 function renderWaterMarkers(points, animate = false) {
   waterLayer.clearLayers();
   points.forEach((p, idx) => {
@@ -340,11 +478,13 @@ function renderWaterMarkers(points, animate = false) {
     const subtypeLine = document.createElement('div');
     subtypeLine.textContent = subtype;
     popup.appendChild(subtypeLine);
-    if (Number.isFinite(p._distanceM)) {
-      const distanceLine = document.createElement('div');
-      distanceLine.textContent = `${Math.round(p._distanceM)} m from route`;
-      popup.appendChild(distanceLine);
-    }
+    // Where it sits along the ride matters more than how far off-route it is.
+    const positionLine = document.createElement('div');
+    positionLine.textContent = [
+      Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : null,
+      Number.isFinite(p._distanceM) ? `${Math.round(p._distanceM)} m off route` : null
+    ].filter(Boolean).join(' · ');
+    if (positionLine.textContent) popup.appendChild(positionLine);
     const mapsLink = document.createElement('a');
     mapsLink.href = `https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}`;
     mapsLink.target = '_blank';
@@ -524,7 +664,13 @@ function resetApp() {
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
     currentRouteIndex = null;
+    currentRouteKm = 0;
     downloadBtn.disabled = true;
+    // Hide the route-specific panels rather than leaving stale numbers up
+    if (summaryEl) summaryEl.hidden = true;
+    if (waterListEl) waterListEl.replaceChildren();
+    if (profilePanel) profilePanel.hidden = true;
+    if (profileSvg) profileSvg.replaceChildren();
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
     if (dropZone && dropZone.classList) dropZone.classList.remove('dragover');
@@ -620,8 +766,11 @@ function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters, routeInde
     .map(p => {
       const lat = p.lat ?? p.center.lat;
       const lon = p.lon ?? p.center.lon;
-      const name = p.tags?.name || p.tags?.description || 'Water';
+      const label = p.tags?.name || p.tags?.description || waterSubtypeLabel(p.tags) || 'Water';
       const type = waterSubtypeLabel(p.tags) || p._type || 'water';
+      // Prefix the ride position so the waypoints are useful on a head unit,
+      // where they otherwise arrive as a row of identically named dots.
+      const name = Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)} — ${label}` : label;
       return {
         type: 'Feature',
         properties: { name, type },
@@ -660,6 +809,7 @@ async function handleRouteFile(file) {
   savedRouteForFile = false;
   // Project the route once; every later radius change and export reuses this.
   currentRouteIndex = buildRouteIndex(geojson);
+  currentRouteKm = currentRouteIndex.totalM / 1000;
   setStatus('Computing bounding box …');
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
@@ -670,8 +820,11 @@ async function handleRouteFile(file) {
       setStatus(`Querying ${backend} for water points … (${done})`);
     }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
-    const near = sortPointsByDistance(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
+    // Ride order, not proximity order: this is the sequence you meet them in.
+    const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
     renderWaterMarkers(near, true);
+    renderSummary(near);
+    renderProfile(near);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
     // Save once, after the route is on screen, and never block rendering on it.
@@ -727,8 +880,10 @@ if (radiusSelect) {
       const routeFC = currentRouteAsFeatureCollection();
       const msgs = [];
       if (foundWaterPoints.length) {
-        const nearW = sortPointsByDistance(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters, currentRouteIndex));
+        const nearW = sortPointsAlongRoute(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters, currentRouteIndex));
         renderWaterMarkers(nearW, true);
+        renderSummary(nearW);
+        renderProfile(nearW);
         msgs.push(`water ${nearW.length}/${foundWaterPoints.length}`);
       }
       if (foundCoffeePoints.length) {

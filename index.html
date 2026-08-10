@@ -10,8 +10,8 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
   <link rel="stylesheet" href="styles.css?v=2">
 </head>
-<body class="bg-slate-950 text-slate-100">
-  <header class="px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between">
+<body class="bg-slate-950 text-slate-100 md:h-screen md:flex md:flex-col">
+  <header class="shrink-0 px-4 py-4 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 flex items-center justify-between">
     <h1 class="m-0 text-lg tracking-wide font-semibold">💧GPX Water Mapper</h1>
     <nav class="flex items-center gap-2">
       <button id="navNewBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🧹 <span>Clean map</span></button>
@@ -21,8 +21,12 @@
     </nav>
   </header>
 
-  <main class="grid md:grid-cols-[360px_1fr] min-h-[calc(100vh-64px)]">
-    <section class="bg-slate-900/60 backdrop-blur border-r border-slate-800 p-4 space-y-4">
+  <!-- On desktop the row is pinned to the viewport and the sidebar scrolls on its
+       own, so the elevation strip under the map is always visible. On narrow
+       screens the columns stack and the page scrolls normally. Height comes from
+       the flex column on body rather than a hardcoded header offset. -->
+  <main class="grid md:grid-cols-[360px_1fr] md:flex-1 md:min-h-0">
+    <section class="bg-slate-900/60 backdrop-blur border-r border-slate-800 p-4 space-y-4 md:overflow-y-auto md:min-h-0">
       <div class="space-y-3">
         <label for="gpxFile" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 cursor-pointer transition">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M12 16a1 1 0 0 1-1-1V7.41L8.7 9.7a1 1 0 1 1-1.4-1.4l4-4a1 1 0 0 1 1.4 0l4 4a1 1 0 1 1-1.4 1.4L13 7.41V15a1 1 0 0 1-1 1Z"/><path d="M5 15a1 1 0 0 1 1 1v2h12v-2a1 1 0 1 1 2 0v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 2 0v2h2v-2a1 1 0 0 1 1-1Z"/></svg>
@@ -68,10 +72,42 @@
 
       <div id="status" class="text-sm text-slate-400 min-h-[18px]" aria-live="polite"></div>
       <div id="error" class="text-sm text-red-400" role="alert" hidden></div>
+
+      <!-- Route summary: the numbers you actually plan around -->
+      <div id="summary" class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-3" hidden>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <div>
+            <div class="text-slate-500 text-xs uppercase tracking-wide">Distance</div>
+            <div id="summaryDistance" class="text-slate-100 font-medium">—</div>
+          </div>
+          <div>
+            <div class="text-slate-500 text-xs uppercase tracking-wide">Water stops</div>
+            <div id="summaryCount" class="text-slate-100 font-medium">—</div>
+          </div>
+        </div>
+        <div id="dryStretch" class="rounded-md border px-3 py-2 text-sm">
+          <div class="text-xs uppercase tracking-wide opacity-70">Longest dry stretch</div>
+          <div id="dryStretchValue" class="font-medium">—</div>
+        </div>
+        <div>
+          <div class="text-slate-500 text-xs uppercase tracking-wide mb-1">Water along the route</div>
+          <ol id="waterList" class="space-y-1 max-h-56 overflow-auto text-sm"></ol>
+        </div>
+      </div>
     </section>
 
-    <section class="relative">
-      <div id="map" class="h-full"></div>
+    <section class="relative flex flex-col md:min-h-0">
+      <!-- flex-1 only resolves against the pinned desktop row; stacked on mobile the
+           section has no height to divide, so give the map an explicit one there. -->
+      <div id="map" class="h-[60vh] md:h-auto md:flex-1 md:min-h-0"></div>
+      <!-- Elevation strip: where the water sits relative to the climbing -->
+      <div id="profilePanel" class="border-t border-slate-800 bg-slate-950 px-3 py-2" hidden>
+        <div class="flex items-baseline justify-between mb-1">
+          <span class="text-xs uppercase tracking-wide text-slate-500">Elevation &amp; water</span>
+          <span id="profileHint" class="text-xs text-slate-500"></span>
+        </div>
+        <svg id="profile" class="w-full block" height="96" preserveAspectRatio="none" role="img" aria-label="Elevation profile with water points"></svg>
+      </div>
     </section>
   </main>
 
@@ -89,7 +125,9 @@
           <li>Load your route: click "Select GPX / FIT" or drag-and-drop a .gpx or .fit file (Garmin devices).</li>
           <li>Choose a search radius. Only water points within this distance of your route are included.</li>
           <li>The map shows found water sources (drinking water, springs, taps, park fountains with potable water, water points). Hover/tap markers for subtype and details.</li>
-          <li>Click "Download enriched GPX" to save your original route with water waypoints added.</li>
+          <li>Read the summary: total distance, how many water stops, and the longest stretch with no water. That last number is the one to plan around — it turns amber past 25 km and red past 40 km.</li>
+          <li>The list and the strip under the map show the stops in the order you will ride past them, with the shaded band marking the dry stretch.</li>
+          <li>Click "Download enriched GPX" to save your original route with water waypoints added. Each waypoint is named with its position, like "km 47.0 — Fountain", so it is readable on a head unit.</li>
           <li>Use "Clean map" anytime to clear the map and start over.</li>
           <li>Click "Search coffee" to find nearby cafes and coffee shops (ranked by distance plus OSM signals like name, hours, and website).</li>
           <li>Click "Weather" to see the weather along your route.</li>

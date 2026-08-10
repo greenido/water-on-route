@@ -150,27 +150,44 @@ export function pointLonLat(p) {
 export function buildRouteIndex(geojsonRoute) {
   const lines = [];
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let totalM = 0;
 
   for (const ls of extractRouteLineStrings(geojsonRoute)) {
     const xy = new Float64Array(ls.length * 2);
+    // Ground metres from the start of this line to each vertex, so a match can
+    // report how far along the route it sits, not just how far off it.
+    const cum = new Float64Array(ls.length);
+    const elevation = new Float64Array(ls.length);
     let lMinX = Infinity, lMinY = Infinity, lMaxX = -Infinity, lMaxY = -Infinity;
+
     for (let i = 0; i < ls.length; i++) {
       const [x, y] = lonLatToWebMercator(ls[i][0], ls[i][1]);
       xy[i * 2] = x;
       xy[i * 2 + 1] = y;
+      elevation[i] = typeof ls[i][2] === 'number' ? ls[i][2] : NaN;
+      if (i > 0) cum[i] = cum[i - 1] + haversineMeters(ls[i - 1], ls[i]);
       if (x < lMinX) lMinX = x;
       if (x > lMaxX) lMaxX = x;
       if (y < lMinY) lMinY = y;
       if (y > lMaxY) lMaxY = y;
     }
-    lines.push({ xy, minX: lMinX, minY: lMinY, maxX: lMaxX, maxY: lMaxY });
+
+    lines.push({
+      xy,
+      cum,
+      elevation,
+      startM: totalM,
+      minX: lMinX, minY: lMinY, maxX: lMaxX, maxY: lMaxY
+    });
+    totalM += cum[cum.length - 1] || 0;
+
     if (lMinX < minX) minX = lMinX;
     if (lMaxX > maxX) maxX = lMaxX;
     if (lMinY < minY) minY = lMinY;
     if (lMaxY > maxY) maxY = lMaxY;
   }
 
-  return { lines, minX, minY, maxX, maxY, isEmpty: lines.length === 0 };
+  return { lines, minX, minY, maxX, maxY, totalM, isEmpty: lines.length === 0 };
 }
 
 /**
@@ -185,8 +202,8 @@ export function buildRouteIndex(geojsonRoute) {
  * @param {number} [maxMeters] optional cutoff; returns Infinity when exceeded
  * @returns {number} metres, or Infinity
  */
-export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
-  if (!index || index.isEmpty) return Infinity;
+export function nearestOnRoute(index, lonLat, maxMeters = Infinity) {
+  if (!index || index.isEmpty) return null;
   const [px, py] = lonLatToWebMercator(lonLat[0], lonLat[1]);
   const scale = mercatorScaleAtY(py);
 
@@ -195,12 +212,13 @@ export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
   if (Number.isFinite(bound)) {
     if (px < index.minX - bound || px > index.maxX + bound ||
         py < index.minY - bound || py > index.maxY + bound) {
-      return Infinity;
+      return null;
     }
   }
 
   let bestSq = Number.isFinite(bound) ? bound * bound : Infinity;
   let bestCy = py;
+  let bestAlongM = 0;
   let found = false;
 
   for (const line of index.lines) {
@@ -210,6 +228,7 @@ export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
       continue;
     }
     const xy = line.xy;
+    const cum = line.cum;
     for (let i = 2; i < xy.length; i += 2) {
       const ax = xy[i - 2], ay = xy[i - 1];
       const bx = xy[i], by = xy[i + 1];
@@ -236,14 +255,28 @@ export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
         bestSq = dSq;
         bestCy = cy;
         found = true;
+        const v = i / 2; // index of the segment's end vertex
+        bestAlongM = line.startM + cum[v - 1] + t * (cum[v] - cum[v - 1]);
         // Tightening the bound makes later segments cheaper to reject.
         bound = Math.sqrt(dSq);
       }
     }
   }
 
-  if (!found) return Infinity;
-  return Math.sqrt(bestSq) / mercatorScaleAtY((py + bestCy) / 2);
+  if (!found) return null;
+  return {
+    distanceM: Math.sqrt(bestSq) / mercatorScaleAtY((py + bestCy) / 2),
+    alongM: bestAlongM
+  };
+}
+
+/**
+ * Ground distance from a lon/lat point to an indexed route.
+ * @returns {number} metres, or Infinity when beyond maxMeters
+ */
+export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
+  const nearest = nearestOnRoute(index, lonLat, maxMeters);
+  return nearest ? nearest.distanceM : Infinity;
 }
 
 /**
@@ -261,10 +294,86 @@ export function filterPointsNearRoute(geojsonRoute, points, maxMeters, routeInde
   for (const p of points || []) {
     const pt = pointLonLat(p);
     if (!pt) continue;
-    const d = distanceToRouteMeters(index, pt, maxMeters);
-    if (d <= maxMeters) result.push({ ...p, _distanceM: d });
+    const nearest = nearestOnRoute(index, pt, maxMeters);
+    if (nearest && nearest.distanceM <= maxMeters) {
+      result.push({ ...p, _distanceM: nearest.distanceM, _alongKm: nearest.alongM / 1000 });
+    }
   }
   return result;
+}
+
+/** Order by position along the route, which is the order they are ridden in. */
+export function sortPointsAlongRoute(points) {
+  return [...points].sort((a, b) => (a._alongKm ?? Infinity) - (b._alongKm ?? Infinity));
+}
+
+/**
+ * The longest stretch of route with no water, including the run-in from the
+ * start and the run-out to the finish.
+ *
+ * This is the number a rider actually plans around: not "how far off-route is
+ * the nearest fountain" but "how long am I without one".
+ *
+ * @param {number} routeKm total route length
+ * @param {Array<{_alongKm: number}>} points water points carrying _alongKm
+ * @returns {{gapKm: number, startKm: number, endKm: number, count: number}}
+ */
+export function longestDryStretch(routeKm, points) {
+  const total = Number.isFinite(routeKm) && routeKm > 0 ? routeKm : 0;
+  const marks = (points || [])
+    .map((p) => p._alongKm)
+    .filter((km) => Number.isFinite(km))
+    .sort((a, b) => a - b);
+
+  if (!total) return { gapKm: 0, startKm: 0, endKm: 0, count: marks.length };
+  if (!marks.length) return { gapKm: total, startKm: 0, endKm: total, count: 0 };
+
+  let gapKm = marks[0];
+  let startKm = 0;
+  let endKm = marks[0];
+
+  for (let i = 1; i < marks.length; i++) {
+    const gap = marks[i] - marks[i - 1];
+    if (gap > gapKm) {
+      gapKm = gap;
+      startKm = marks[i - 1];
+      endKm = marks[i];
+    }
+  }
+
+  const runOut = total - marks[marks.length - 1];
+  if (runOut > gapKm) {
+    gapKm = runOut;
+    startKm = marks[marks.length - 1];
+    endKm = total;
+  }
+
+  return { gapKm, startKm, endKm, count: marks.length };
+}
+
+/**
+ * Elevation samples for a compact profile strip: [{ km, ele }].
+ * Returns [] when the route carries no elevation data.
+ * @param {object} index from buildRouteIndex
+ * @param {number} [samples] target number of points
+ */
+export function elevationProfile(index, samples = 240) {
+  if (!index || index.isEmpty) return [];
+  const all = [];
+  for (const line of index.lines) {
+    for (let i = 0; i < line.cum.length; i++) {
+      const ele = line.elevation[i];
+      if (Number.isFinite(ele)) all.push({ km: (line.startM + line.cum[i]) / 1000, ele });
+    }
+  }
+  if (all.length < 2) return [];
+  if (all.length <= samples) return all;
+  // Even stride keeps the shape without shipping thousands of points to the DOM.
+  const stride = all.length / samples;
+  const out = [];
+  for (let i = 0; i < samples; i++) out.push(all[Math.floor(i * stride)]);
+  out.push(all[all.length - 1]);
+  return out;
 }
 
 /** Axis-aligned bounds of any GeoJSON value, in Overpass key order. */
