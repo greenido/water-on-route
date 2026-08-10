@@ -3,10 +3,10 @@
  * Purpose: Leaflet-based GPX/FIT viewer that finds near-route water points via Overpass
  *          and exports an enriched GPX with waypoints.
  *
- * Dependencies provided by HTML (globals):
+ * Dependencies provided by HTML (globals), each pinned with an SRI hash:
  *   - Leaflet (L)
  *   - toGeoJSON
- *   - togpx (loaded on demand if not present)
+ *   - togpx
  *
  * ESM imports:
  *   - fetchOSMWaterPointsAdaptive from ./osmApi.mjs
@@ -77,11 +77,8 @@ const helpPanel = document.getElementById('helpPanel');
 const helpCloseBtn = document.getElementById('helpCloseBtn');
 const helpOkBtn = document.getElementById('helpOkBtn');
 
-// Remove failing overpass-frontend CDN import; rely on fetch fallback below
-
 // Map setup
 const map = L.map('map', { zoomControl: true, zoomAnimation: true });
-const tileUrl = (window.WOR_CONFIG && window.WOR_CONFIG.tileUrl) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const baseTileOptions = {
   // Allow overscaling beyond native zoom to avoid gaps when zooming in
   maxZoom: 22,
@@ -295,42 +292,23 @@ function renderRoute(geojson) {
   fitMapToGeoJSON(geojson);
 }
 
-// Ensure GPX exporter is available (supports global UMD or dynamic load)
-let ensureToGpxPromise;
-function ensureToGpxAvailable() {
-  if (ensureToGpxPromise) return ensureToGpxPromise;
-  ensureToGpxPromise = new Promise(async (resolve, reject) => {
-    try {
-      if (typeof window !== 'undefined' && typeof window.togpx === 'function') {
-        return resolve(window.togpx);
-      }
-      // Try loading classic UMD script
-      await new Promise((res, rej) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/togpx@0.5.6/togpx.js';
-        s.async = true;
-        s.onload = () => res();
-        s.onerror = () => rej(new Error('Failed to load togpx UMD'));
-        document.head.appendChild(s);
-      });
-      if (typeof window !== 'undefined' && typeof window.togpx === 'function') {
-        return resolve(window.togpx);
-      }
-      // Fallback: dynamic ESM shim
-      try {
-        const mod = await import('https://esm.sh/togpx@0.5.6');
-        const fn = mod?.default || mod?.togpx;
-        if (typeof fn === 'function') {
-          if (typeof window !== 'undefined') window.togpx = fn;
-          return resolve(fn);
-        }
-      } catch (_) {}
-      reject(new Error('GPX exporter not loaded.'));
-    } catch (e) {
-      reject(e);
-    }
-  });
-  return ensureToGpxPromise;
+/**
+ * The GPX exporter, loaded by index.html with an SRI hash.
+ *
+ * This used to fall back to injecting togpx 0.5.6 from jsdelivr and then to
+ * importing it from esm.sh. Neither could ever run: index.html always defines
+ * window.togpx first, the injected copy was a different version than the
+ * pinned one, and esm.sh is not in the page's script-src, so the import was
+ * blocked by CSP. A missing exporter is a broken deployment, so say that.
+ *
+ * @returns {Function} togpx
+ */
+function requireToGpx() {
+  const toGpx = typeof window !== 'undefined' ? window.togpx : undefined;
+  if (typeof toGpx !== 'function') {
+    throw new Error('GPX exporter failed to load. Check your connection and reload the page.');
+  }
+  return toGpx;
 }
 
 /**
@@ -408,7 +386,6 @@ async function saveRoute(points) {
 
   savedRouteForFile = true;
   try {
-    await ensureToGpxAvailable();
     const routeFC = currentRouteAsFeatureCollection();
     const payload = {
       filename: currentRouteFilename,
@@ -436,7 +413,6 @@ async function renderCoffeeMarkers(points, animate = false) {
   coffeeLayer.clearLayers();
   points.forEach((p, idx) => {
     const name = p.tags && (p.tags.name || p.tags.brand || p.tags.operator || p.tags.description) || 'Coffee';
-    const type = p._type || p.tags?.amenity || p.tags?.shop || 'cafe';
     const lat = p.lat || p.center?.lat;
     const lon = p.lon || p.center?.lon;
     if (typeof lat !== 'number' || typeof lon !== 'number') return;
@@ -622,11 +598,7 @@ async function parseFitFile(file) {
   const buffer = await file.arrayBuffer();
   const geojson = await parseFitToGeoJSON(buffer);
   // Persist a GPX representation so admin/original downloads still work
-  await ensureToGpxAvailable();
-  const toGpxFn = (typeof window !== 'undefined' && window.togpx) || (typeof globalThis !== 'undefined' && globalThis.togpx);
-  originalGpxText = typeof toGpxFn === 'function'
-    ? toGpxFn(geojson, { creator: 'GPX Water Mapper (from FIT)' })
-    : '';
+  originalGpxText = requireToGpx()(geojson, { creator: 'GPX Water Mapper (from FIT)' });
   return geojson;
 }
 
@@ -660,12 +632,7 @@ function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters, routeInde
     type: 'FeatureCollection',
     features: [...geojsonRoute.features, ...waypointFeatures]
   };
-  const toGpxFn = (typeof window !== 'undefined' && window.togpx) || (typeof globalThis !== 'undefined' && globalThis.togpx);
-  if (typeof toGpxFn !== 'function') {
-    throw new Error('GPX exporter not loaded. Please ensure togpx is available.');
-  }
-  const gpxText = toGpxFn(combined, { creator: 'GPX Water Mapper' });
-  return gpxText;
+  return requireToGpx()(combined, { creator: 'GPX Water Mapper' });
 }
 
 function download(filename, text) {
@@ -732,10 +699,9 @@ dropZone.addEventListener('drop', (e) => {
   if (f) handleRouteFile(f).catch(err => setError(err.message || String(err)));
 });
 
-downloadBtn.addEventListener('click', async () => {
+downloadBtn.addEventListener('click', () => {
   try {
     if (!routeLayer) return;
-    await ensureToGpxAvailable();
     const gpx = combineToEnrichedGpx(currentRouteAsFeatureCollection(), foundWaterPoints, selectedRadiusMeters);
     download('enriched.gpx', gpx);
   } catch (e) {
