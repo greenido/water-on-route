@@ -76,6 +76,7 @@ Notes:
   - Queries Overpass for potable water: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`, `amenity=water_point`, potable `amenity=fountain` / `man_made=water_well`, and `drinking_water=yes|compatible` (excludes `drinking_water=no`)
   - Optional coffee search: `amenity=cafe`, `shop=coffee`, restaurants with coffee-related cuisine; ranked by corridor distance plus OSM signals (name/brand, cuisine, hours, website)
   - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
+  - Split quads are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
 
 - Backend (`server/index.js`)
@@ -156,6 +157,8 @@ If you leave variables unset, sane defaults will be used:
 - `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
 - `ENABLE_GEOIP`: opt in to third-party city lookup for stored IPs (default `false`)
 - `MAX_ROUTE_DB_BYTES`: refuse new uploads past this DB size (default `536870912`)
+- `OVERPASS_CACHE_TTL_MS`: how long a cached Overpass response stays fresh (default 6 h)
+- `OVERPASS_CACHE_MAX_ENTRIES` / `OVERPASS_CACHE_MAX_BYTES`: cache bounds (default `200` / 64 MB)
 
 Copy `.env.example` to `.env` for the complete configuration template. Never
 commit `.env` or real credentials.
@@ -202,6 +205,7 @@ The Express server exposes a few endpoints:
     query text is never forwarded, so the endpoint cannot be used as an open relay
   - Same-origin requests only; a bbox spanning more than 12° on a side is rejected
     with `400`, which the client treats as a signal to split and retry
+  - Successful responses are cached in memory (LRU, bounded by count, bytes and age); the reply carries `X-Cache: HIT` or `MISS`
   - Returns the Overpass response as text, passing through the content-type when available
 - `GET /tiles/{z}/{x}/{y}.png` – tile proxy
   - Fetches the tile from `TILE_URL_TEMPLATE` and forwards it with caching headers

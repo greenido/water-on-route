@@ -2,6 +2,38 @@
 
 export function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+/**
+ * Cap how many operations run at once.
+ *
+ * Wrap only the leaf network call, never a function that awaits its own
+ * children: a parent holding a slot while waiting on a child it cannot
+ * schedule would deadlock.
+ *
+ * @param {number} max concurrent operations
+ * @returns {(fn: () => Promise<any>) => Promise<any>}
+ */
+export function createLimiter(max) {
+  const limit = Math.max(1, Math.floor(max) || 1);
+  let active = 0;
+  const queue = [];
+
+  const pump = () => {
+    while (active < limit && queue.length) {
+      const { fn, resolve, reject } = queue.shift();
+      active++;
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => { active--; pump(); });
+    }
+  };
+
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    pump();
+  });
+}
+
 export async function fetchWithTimeout(url, options, timeoutMs, fetchImpl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -267,12 +299,17 @@ export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}
   const fetchImpl = options.fetchImpl; // optional for tests
   const kind = options.kind ?? 'water';
   const parseXml = options.parseXml ?? parseOsmXmlForWater;
+  // Overpass hands out a small number of slots per client; a couple of
+  // requests in flight overlaps the latency without provoking 429s.
+  const limit = createLimiter(options.concurrency ?? 2);
 
   let tilesFetched = 0;
 
   async function fetchTile(tile, attempt) {
     try {
-      const xml = await fetchOverpassXml(tile, kind, timeoutMs, fetchImpl);
+      // Only the network call is limited, so a parent awaiting its quads is
+      // never occupying a slot.
+      const xml = await limit(() => fetchOverpassXml(tile, kind, timeoutMs, fetchImpl));
       tilesFetched++;
       if (onProgress) onProgress(tilesFetched, undefined);
       return parseXml(xml);
@@ -284,12 +321,8 @@ export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}
         const backoff = Math.min(initialBackoffMs * Math.pow(2, attempt), maxBackoffMs);
         if (backoff > 0) await sleep(backoff);
         const quads = splitBboxIntoQuads(tile);
-        let all = [];
-        for (const q of quads) {
-          const pts = await fetchTile(q, attempt + 1);
-          if (pts && pts.length) all = all.concat(pts);
-        }
-        return all;
+        const results = await Promise.all(quads.map((q) => fetchTile(q, attempt + 1)));
+        return results.flat();
       }
       throw e;
     }

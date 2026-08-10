@@ -11,7 +11,8 @@ import {
   coffeeQualityBoost,
   rankCoffeePoints,
   sortPointsByDistance,
-  fetchOverpassPointsAdaptive
+  fetchOverpassPointsAdaptive,
+  createLimiter
 } from '../osmApi.mjs';
 
 const BBOX = { minlat: 37, minlon: -122.4, maxlat: 37.4, maxlon: -122 };
@@ -236,4 +237,90 @@ test('adaptive fetch reports progress per completed tile', async () => {
     parseXml: () => []
   });
   assert.deepEqual(progress, [1]);
+});
+
+test('createLimiter never runs more than the cap at once', async () => {
+  const limit = createLimiter(3);
+  let active = 0;
+  let peak = 0;
+  const task = async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise(r => setTimeout(r, 5));
+    active--;
+    return true;
+  };
+  const results = await Promise.all(Array.from({ length: 20 }, () => limit(task)));
+  assert.equal(results.length, 20);
+  assert.equal(peak, 3);
+  assert.equal(active, 0);
+});
+
+test('createLimiter treats a bad cap as one at a time', async () => {
+  for (const bad of [0, -4, NaN, undefined]) {
+    const limit = createLimiter(bad);
+    let active = 0;
+    let peak = 0;
+    await Promise.all(Array.from({ length: 5 }, () => limit(async () => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(r => setTimeout(r, 1));
+      active--;
+    })));
+    assert.equal(peak, 1, `cap ${bad} should serialize`);
+  }
+});
+
+test('createLimiter releases the slot when a task throws', async () => {
+  const limit = createLimiter(1);
+  await assert.rejects(limit(async () => { throw new Error('boom'); }), /boom/);
+  // If the slot leaked, this would hang rather than resolve.
+  assert.equal(await limit(async () => 'after'), 'after');
+});
+
+test('quads are fetched concurrently but stay under the cap', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    if (calls === 1) return reply(429, 'slow down');
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise(r => setTimeout(r, 10));
+    inFlight--;
+    return reply(200, 'ok');
+  };
+
+  await fetchOverpassPointsAdaptive(BBOX, null, {
+    fetchImpl,
+    initialBackoffMs: 0,
+    minSpan: 0.01,
+    concurrency: 2,
+    parseXml: () => []
+  });
+
+  assert.equal(calls, 5, 'one parent plus four quads');
+  assert.ok(peak > 1, `quads should overlap, peak was ${peak}`);
+  assert.ok(peak <= 2, `peak ${peak} exceeded the cap`);
+});
+
+test('deep recursive splitting does not deadlock under a small cap', async () => {
+  // Every request above the floor fails, forcing several levels of splitting.
+  // A limiter that held a slot while awaiting children would hang here.
+  let calls = 0;
+  const fetchImpl = async (_url, options) => {
+    calls++;
+    const { bbox } = JSON.parse(options.body);
+    const span = Math.max(bbox.maxlat - bbox.minlat, bbox.maxlon - bbox.minlon);
+    return span > 0.05 ? reply(504, 'timeout') : reply(200, 'ok');
+  };
+
+  const points = await fetchOverpassPointsAdaptive(
+    { minlat: 37, minlon: -122.8, maxlat: 37.8, maxlon: -122 },
+    null,
+    { fetchImpl, initialBackoffMs: 0, minSpan: 0.01, concurrency: 1, parseXml: () => [{ _type: 'node', id: calls }] }
+  );
+
+  assert.ok(calls > 20, `expected deep splitting, got ${calls} calls`);
+  assert.ok(points.length > 0);
 });
