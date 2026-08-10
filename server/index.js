@@ -280,21 +280,13 @@ app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res)
       return res.status(400).json({ error: validation.error });
     }
     const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = validation.value;
-    console.log('[POST /api/routes] Incoming request', {
-      filename,
-      bbox,
-      routeKm,
-      waypointsCount,
-      hasWaterPoints: !!waterPoints,
-      hasEnrichedGpx: !!enrichedGpxText
-    });
     const fileSize = Buffer.byteLength(gpxText, 'utf8');
     // Store only the coarse network, never the full address: a GPX track plus a
     // full IP identifies a person, and this endpoint takes no authentication.
     const clientIp = anonymizeIp(req.ip || req.socket?.remoteAddress || null);
-    console.log('[POST /api/routes] Calculated fileSize and clientIp', { fileSize, clientIp });
     const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
-    console.log('[POST /api/routes] Route inserted', { id: result.id });
+    // One line per upload rather than three; the details are in the row.
+    console.log('[POST /api/routes] saved', { id: result.id, filename, fileSize, routeKm, waypointsCount });
     return res.json({ ok: true, id: result.id });
   } catch (e) {
     console.error('[POST /api/routes] Error:', e);

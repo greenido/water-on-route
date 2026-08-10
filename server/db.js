@@ -18,6 +18,11 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const { clampListLimit, clampListOffset } = require('./pagination');
 
+// Per-operation tracing is useful when a Fly volume misbehaves and pure noise
+// the rest of the time. Errors and warnings always log; this gates the rest.
+const DEBUG_DB = process.env.DEBUG_DB === 'true';
+const debugLog = DEBUG_DB ? (...args) => debugLog(...args) : () => {};
+
 // Prefer project data directory in development, and /data in production (Fly volumes)
 const PROJECT_DATA_DIR = path.join(__dirname, '..', 'data');
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || !!process.env.FLY_APP_NAME || !!process.env.FLY_MACHINE;
@@ -27,11 +32,11 @@ const DEFAULT_DB_DIRS = IS_PRODUCTION
 
 function ensureDirectory(dirPath) {
   const startTime = Date.now();
-  console.debug('[db.ensureDirectory] start', { dirPath });
+  debugLog('[db.ensureDirectory] start', { dirPath });
   try {
     fs.mkdirSync(dirPath, { recursive: true });
     const elapsedMs = Date.now() - startTime;
-    console.debug('[db.ensureDirectory] success', { dirPath, elapsedMs });
+    debugLog('[db.ensureDirectory] success', { dirPath, elapsedMs });
     return true;
   } catch (err) {
     const elapsedMs = Date.now() - startTime;
@@ -42,13 +47,13 @@ function ensureDirectory(dirPath) {
 
 function resolveDatabasePath() {
   const startTime = Date.now();
-  console.debug('[db.resolveDatabasePath] start');
+  debugLog('[db.resolveDatabasePath] start');
   const envPath = process.env.ROUTES_DB_PATH;
   if (envPath) {
     const dir = path.dirname(envPath);
     if (ensureDirectory(dir)) {
       const elapsedMs = Date.now() - startTime;
-      console.debug('[db.resolveDatabasePath] using env path', { envPath, elapsedMs });
+      debugLog('[db.resolveDatabasePath] using env path', { envPath, elapsedMs });
       return envPath;
     }
   }
@@ -56,14 +61,14 @@ function resolveDatabasePath() {
     if (ensureDirectory(dir)) {
       const resolved = path.join(dir, 'routes.sqlite3');
       const elapsedMs = Date.now() - startTime;
-      console.debug('[db.resolveDatabasePath] resolved default', { dir, resolved, elapsedMs });
+      debugLog('[db.resolveDatabasePath] resolved default', { dir, resolved, elapsedMs });
       return resolved;
     }
   }
   // fallback to cwd
   const fallback = path.join(process.cwd(), 'routes.sqlite3');
   const elapsedMs = Date.now() - startTime;
-  console.debug('[db.resolveDatabasePath] fallback cwd', { fallback, elapsedMs });
+  debugLog('[db.resolveDatabasePath] fallback cwd', { fallback, elapsedMs });
   return fallback;
 }
 
@@ -72,7 +77,7 @@ let db;
 
 function initDatabase() {
   const startTime = Date.now();
-  console.info('[db.initDatabase] opening', { DB_PATH });
+  debugLog('[db.initDatabase] opening', { DB_PATH });
   return new Promise((resolve, reject) => {
     db = new sqlite3.Database(DB_PATH, (err) => {
       if (err) {
@@ -101,7 +106,7 @@ function initDatabase() {
           migrateSchema()
             .then(() => {
               const elapsedMs = Date.now() - startTime;
-              console.info('[db.initDatabase] ready', { elapsedMs });
+              debugLog('[db.initDatabase] ready', { elapsedMs });
               resolve();
             })
             .catch((e) => {
@@ -117,7 +122,7 @@ function initDatabase() {
 
 function migrateSchema() {
   const startTime = Date.now();
-  console.debug('[db.migrateSchema] start');
+  debugLog('[db.migrateSchema] start');
   return new Promise((resolve) => {
     db.all(`PRAGMA table_info(routes)`, [], (err, rows) => {
       if (err) {
@@ -135,7 +140,7 @@ function migrateSchema() {
       migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_uploaded_at ON routes (uploaded_at DESC, id DESC)`);
       if (migrations.length === 0) {
         const elapsedMs = Date.now() - startTime;
-        console.debug('[db.migrateSchema] no migrations needed', { elapsedMs });
+        debugLog('[db.migrateSchema] no migrations needed', { elapsedMs });
         return resolve();
       }
       let idx = 0;
@@ -154,7 +159,7 @@ function migrateSchema() {
 
 function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText }) {
   const startTime = Date.now();
-  console.info('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
+  debugLog('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
   return new Promise((resolve, reject) => {
     const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, enriched_gpx_text)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
@@ -166,7 +171,7 @@ function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxTex
         return reject(err);
       }
       const elapsedMs = Date.now() - startTime;
-      console.info('[db.insertRoute] success', { id: this.lastID, elapsedMs });
+      debugLog('[db.insertRoute] success', { id: this.lastID, elapsedMs });
       resolve({ id: this.lastID });
     });
   });
@@ -238,7 +243,7 @@ function listRouteIds() {
 
 function getRouteById(id) {
   const startTime = Date.now();
-  console.debug('[db.getRouteById] start', { id });
+  debugLog('[db.getRouteById] start', { id });
   return new Promise((resolve, reject) => {
     db.get(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, water_points_json, uploaded_at, client_ip FROM routes WHERE id = ?`, [id], (err, row) => {
       if (err) {
@@ -248,7 +253,7 @@ function getRouteById(id) {
       }
       if (!row) {
         const elapsedMs = Date.now() - startTime;
-        console.debug('[db.getRouteById] not found', { id, elapsedMs });
+        debugLog('[db.getRouteById] not found', { id, elapsedMs });
         return resolve(null);
       }
       const result = {
@@ -265,7 +270,7 @@ function getRouteById(id) {
         clientIp: row.client_ip
       };
       const elapsedMs = Date.now() - startTime;
-      console.debug('[db.getRouteById] success', { id, hasEnriched: !!result.enrichedGpxText, hasWater: !!result.waterPoints, elapsedMs });
+      debugLog('[db.getRouteById] success', { id, hasEnriched: !!result.enrichedGpxText, hasWater: !!result.waterPoints, elapsedMs });
       resolve(result);
     });
   });
@@ -283,7 +288,7 @@ function safeParseJson(txt) {
 
 function deleteRouteById(id) {
   const startTime = Date.now();
-  console.info('[db.deleteRouteById] start', { id });
+  debugLog('[db.deleteRouteById] start', { id });
   return new Promise((resolve, reject) => {
     db.run(`DELETE FROM routes WHERE id = ?`, [id], function(err) {
       if (err) {
@@ -293,7 +298,7 @@ function deleteRouteById(id) {
       }
       const elapsedMs = Date.now() - startTime;
       const deletedCount = Number(this && this.changes) || 0;
-      console.info('[db.deleteRouteById] success', { id, deletedCount, elapsedMs });
+      debugLog('[db.deleteRouteById] success', { id, deletedCount, elapsedMs });
       resolve({ deletedCount });
     });
   });
