@@ -37,6 +37,7 @@ import {
   sortPointsAlongRoute,
   longestDryStretch,
   elevationProfile,
+  formatKm,
 } from './geo.mjs';
 
 // Basic UI elements
@@ -337,12 +338,6 @@ function currentRouteAsFeatureCollection() {
     : { type: 'FeatureCollection', features: [routeGeo] };
 }
 
-/** One decimal below 100 km, whole numbers above; nobody plans to 10 metres. */
-function formatKm(km) {
-  if (!Number.isFinite(km)) return '—';
-  return km >= 100 ? String(Math.round(km)) : km.toFixed(1);
-}
-
 /**
  * Colour the dry-stretch callout by how much trouble it represents.
  * Thresholds are deliberately conservative: 25 km is roughly an hour of
@@ -526,15 +521,16 @@ async function saveRoute(points) {
 
   savedRouteForFile = true;
   try {
-    const routeFC = currentRouteAsFeatureCollection();
+    // The enriched GPX is not uploaded: the server rebuilds it from the
+    // original plus these water points, which halves both the request and the
+    // stored row for a file that is entirely derivable.
     const payload = {
       filename: currentRouteFilename,
       gpxText: originalGpxText,
       bbox: computeBBoxFromGeoJSON(currentRouteGeoJSON),
       routeKm: Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2)),
       waypointsCount: points.length,
-      waterPoints: points,
-      enrichedGpxText: combineToEnrichedGpx(routeFC, points, selectedRadiusMeters)
+      waterPoints: points
     };
     const resp = await fetch('/api/routes', {
       method: 'POST',
