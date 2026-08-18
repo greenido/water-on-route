@@ -21,6 +21,7 @@
     <h1 class="m-0 text-base sm:text-lg tracking-wide font-semibold truncate min-w-0">💧GPX Water Mapper</h1>
     <nav class="flex items-center gap-1.5 sm:gap-2 shrink-0">
       <button id="navNewBtn" aria-label="Clean map" title="Clean map" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">🧹 <span class="hidden md:inline">Clean map</span></button>
+      <button id="navRefillBtn" aria-label="Find refill stops along the route" title="Find refill stops along the route" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⛽ <span class="hidden md:inline">Refill stops</span></button>
       <button id="navCoffeeBtn" aria-label="Search coffee along the route" title="Search coffee along the route" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">☕ <span class="hidden md:inline">Search coffee</span></button>
       <a href="https://greenido.github.io/weather-4-bike/" target="_blank" rel="noopener" aria-label="Weather along your route" title="Weather along your route" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">⛅ <span class="hidden md:inline">Weather</span></a>
       <button id="navHelpBtn" aria-label="Help" title="Help" class="px-2.5 sm:px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm inline-flex items-center gap-2">❓ <span class="hidden md:inline">Help</span></button>
@@ -94,6 +95,7 @@
         <div id="dryStretch" class="rounded-md border px-3 py-2 text-sm">
           <div class="text-xs uppercase tracking-wide opacity-70">Longest dry stretch</div>
           <div id="dryStretchValue" class="font-medium">—</div>
+          <div id="refillEffect" class="mt-1 pt-1 border-t border-current/20 text-xs opacity-90" hidden></div>
         </div>
         <div>
           <div class="text-slate-500 text-xs uppercase tracking-wide mb-1">Water along the route</div>
@@ -135,6 +137,13 @@
           <li>The list and the strip under the map show the stops in the order you will ride past them, with the shaded band marking the dry stretch.</li>
           <li>Click "Download enriched GPX" to save your original route with water waypoints added. Each waypoint is named with its position, like "km 47.0 — Fountain", so it is readable on a head unit.</li>
           <li>Use "Clean map" anytime to clear the map and start over.</li>
+          <li>
+            Click "Refill stops" for places to top up that are not tagged as drinking water —
+            fuel stations, shops, campgrounds, public toilets and cemetery taps. Outside towns
+            these are often the only water for tens of kilometres. Each is marked by how sure
+            you can be: 🚰 tagged as drinking water, ⛽ ask inside, 🚻 worth a try. The dry
+            stretch box then shows what they do to your worst gap.
+          </li>
           <li>Click "Search coffee" to find nearby cafes and coffee shops (ranked by distance plus OSM signals like name, hours, and website).</li>
           <li>Click "Weather" to see the weather along your route.</li>
         <li>
@@ -150,6 +159,7 @@
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">L</kbd><span>Select GPX / FIT (open file)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">N</kbd><span>Clean map (reset)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">D</kbd><span>Download enriched GPX</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">F</kbd><span>Find ⛽ refill stops</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">C</kbd><span>Press C (no modifiers) to trigger ☕ Search coffee</span></li>
           </ul>
         </div>
@@ -181,7 +191,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5.8.1/dist/togeojson.umd.js" integrity="sha384-4a+9x4ql6wch9epMfqnC3bSjASMJDDqpSuVblbNd6thkfnwdBucHgePPyl0exaFY" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/togpx@0.5.4/togpx.js" integrity="sha384-VKWiOLzj25saMnPgMUQG2n3n2YzT53ahfp5hrYIWvf996S+pKveAOXPW82Ttrgrg" crossorigin="anonymous"></script>
   <!-- Overpass-Frontend via ESM shim -->
-  <script type="module" src="app.js?v=4"></script>
+  <script type="module" src="app.js?v=5"></script>
 </body>
 </html>
 
