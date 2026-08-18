@@ -348,6 +348,96 @@ export async function fetchOSMCoffeePointsAdaptive(bbox, onProgress, options = {
   });
 }
 
+/**
+ * Refill stops: places to top up bottles that are not tagged as drinking
+ * water. Deliberately excludes cafes, which the coffee search already covers.
+ */
+export function isRefillTags(tags) {
+  if (!tags || typeof tags !== 'object') return false;
+  if (tags.drinking_water === 'no') return false;
+  if (tags.amenity === 'fuel') return true;
+  if (tags.shop === 'convenience' || tags.shop === 'supermarket') return true;
+  if (tags.amenity === 'toilets') return true;
+  if (['camp_site', 'picnic_site', 'wilderness_hut', 'alpine_hut'].includes(tags.tourism)) return true;
+  if (tags.amenity === 'grave_yard' || tags.landuse === 'cemetery') return true;
+  if (tags.amenity === 'water_point' || tags.waterway === 'water_point') return true;
+  return false;
+}
+
+/**
+ * How sure a rider can be of getting water here.
+ *
+ * The point of the tiers is that a fuel station and a cemetery tap are both
+ * water, but you plan around them differently. 'certain' is only for features
+ * whose tagging says water outright; everything else is an educated guess and
+ * says so rather than being drawn like a fountain.
+ *
+ * @returns {'certain'|'likely'|'maybe'}
+ */
+export function refillConfidence(tags) {
+  const t = tags || {};
+  if (t.drinking_water === 'yes' || t.drinking_water === 'compatible') return 'certain';
+  if (t.amenity === 'water_point' || t.waterway === 'water_point') return 'certain';
+  // Staffed and effectively always open to a customer asking for a tap.
+  if (t.amenity === 'fuel' || t.shop === 'convenience' || t.shop === 'supermarket') return 'likely';
+  if (t.tourism === 'camp_site' || t.tourism === 'alpine_hut') return 'likely';
+  return 'maybe';
+}
+
+const REFILL_LABELS = [
+  ['amenity', 'fuel', 'Fuel station'],
+  ['shop', 'convenience', 'Convenience store'],
+  ['shop', 'supermarket', 'Supermarket'],
+  ['amenity', 'toilets', 'Public toilets'],
+  ['tourism', 'camp_site', 'Campground'],
+  ['tourism', 'picnic_site', 'Picnic site'],
+  ['tourism', 'wilderness_hut', 'Wilderness hut'],
+  ['tourism', 'alpine_hut', 'Alpine hut'],
+  ['amenity', 'grave_yard', 'Cemetery tap'],
+  ['landuse', 'cemetery', 'Cemetery tap'],
+  ['amenity', 'water_point', 'Water point'],
+  ['waterway', 'water_point', 'Water point']
+];
+
+/** Short human label for a refill stop, e.g. "Fuel station". */
+export function refillLabel(tags) {
+  const t = tags || {};
+  for (const [key, value, label] of REFILL_LABELS) {
+    if (t[key] === value) return label;
+  }
+  return 'Refill stop';
+}
+
+/** One line telling the rider what to expect on arrival. */
+export function refillExpectation(tags) {
+  switch (refillConfidence(tags)) {
+    case 'certain': return 'Tagged as drinking water';
+    case 'likely': return 'Ask inside — usually fine';
+    default: return 'Worth a try, not guaranteed';
+  }
+}
+
+export async function fetchOSMRefillPointsAdaptive(bbox, onProgress, options = {}) {
+  return fetchOverpassPointsAdaptive(bbox, onProgress, {
+    ...options,
+    kind: 'refill',
+    parseXml: (xml) => parseOsmXmlGeneric(xml).filter((p) => isRefillTags(p.tags)),
+  });
+}
+
+/**
+ * Rank refill stops: certainty first, then closeness to the route. A sure tap
+ * 200 m away beats a maybe at 40 m.
+ */
+const REFILL_CONFIDENCE_ORDER = { certain: 0, likely: 1, maybe: 2 };
+export function rankRefillPoints(points) {
+  return [...points].sort((a, b) => {
+    const byConfidence = REFILL_CONFIDENCE_ORDER[refillConfidence(a.tags)] - REFILL_CONFIDENCE_ORDER[refillConfidence(b.tags)];
+    if (byConfidence !== 0) return byConfidence;
+    return (a._distanceM ?? Infinity) - (b._distanceM ?? Infinity);
+  });
+}
+
 export function coffeeQualityBoost(p) {
   const tags = (p && p.tags) || {};
   let boost = 0;

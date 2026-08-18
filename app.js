@@ -19,14 +19,19 @@
  * UX features:
  *   - Drag & drop or file picker for GPX / FIT
  *   - Base layer switcher and animated water markers
- *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download
+ *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download, 'F' refill, 'C' coffee
  */
 
 import {
   fetchOSMWaterPointsAdaptive,
   fetchOSMCoffeePointsAdaptive,
+  fetchOSMRefillPointsAdaptive,
   waterSubtypeLabel,
   rankCoffeePoints,
+  rankRefillPoints,
+  refillLabel,
+  refillConfidence,
+  refillExpectation,
 } from './osmApi.mjs';
 import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
 import {
@@ -54,6 +59,7 @@ const summaryDistanceEl = document.getElementById('summaryDistance');
 const summaryCountEl = document.getElementById('summaryCount');
 const dryStretchEl = document.getElementById('dryStretch');
 const dryStretchValueEl = document.getElementById('dryStretchValue');
+const refillEffectEl = document.getElementById('refillEffect');
 const waterListEl = document.getElementById('waterList');
 const profilePanel = document.getElementById('profilePanel');
 const profileSvg = document.getElementById('profile');
@@ -83,6 +89,7 @@ if (saveRouteToggle) {
 const navNewBtn = document.getElementById('navNewBtn');
 const navHelpBtn = document.getElementById('navHelpBtn');
 const navCoffeeBtn = document.getElementById('navCoffeeBtn');
+const navRefillBtn = document.getElementById('navRefillBtn');
 const helpModal = document.getElementById('helpModal');
 const helpOverlay = document.getElementById('helpOverlay');
 const helpPanel = document.getElementById('helpPanel');
@@ -207,11 +214,26 @@ let routeLayer = null;
 let currentRouteGeoJSON = null;
 let waterLayer = L.layerGroup().addTo(map);
 const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
+let refillLayer = L.layerGroup().addTo(map);
+// Distinct glyphs per tier: a guaranteed tap and a "worth a try" cemetery
+// should not look identical on the map.
+const REFILL_ICONS = { certain: '🚰', likely: '⛽', maybe: '🚻' };
+const refillIcon = (confidence) => L.divIcon({
+  className: `water-marker refill-${confidence}`,
+  html: REFILL_ICONS[confidence] || REFILL_ICONS.maybe,
+  iconSize: [24, 24],
+  iconAnchor: [12, 12]
+});
 let coffeeLayer = L.layerGroup().addTo(map);
 const baseCoffeeIcon = () => L.divIcon({ className: 'water-marker', html: '☕', iconSize: [24, 24], iconAnchor: [12, 12] });
 let originalGpxText = '';
 let foundWaterPoints = [];
 let foundCoffeePoints = [];
+let foundRefillPoints = [];
+let nearRefillPoints = [];
+// The near-route water points currently drawn, so a refill search arriving
+// later can redraw the summary without re-filtering water.
+let lastNearWaterPoints = [];
 let layersControl = null;
 // Name of the file currently loaded, and whether it has already been persisted.
 // Guards against re-uploading the same route on every radius change.
@@ -222,7 +244,7 @@ let currentRouteIndex = null;
 let currentRouteKm = 0;
 
 // Layers control: allow switching base maps and toggling overlays
-layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
+layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Refill Stops': refillLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
 
 // Helpers
 function setStatus(msg) { statusEl.textContent = msg || ''; }
@@ -349,6 +371,26 @@ function dryStretchSeverity(gapKm) {
   return { tone: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200', note: 'comfortable' };
 }
 
+/**
+ * Second line under the dry stretch: how far the gap shrinks once refill
+ * stops are counted. Hidden until a refill search has actually run.
+ */
+function renderRefillEffect(waterOnlyDry) {
+  if (!refillEffectEl) return;
+  if (!nearRefillPoints.length) {
+    refillEffectEl.hidden = true;
+    return;
+  }
+  refillEffectEl.hidden = false;
+  const combined = longestDryStretch(currentRouteKm, [...lastNearWaterPoints, ...nearRefillPoints]);
+  const saved = waterOnlyDry.gapKm - combined.gapKm;
+  const count = nearRefillPoints.length;
+  const plural = count === 1 ? 'refill stop' : 'refill stops';
+  refillEffectEl.textContent = saved > 0.05
+    ? `With ${count} ${plural}: ${formatKm(combined.gapKm)} km (km ${formatKm(combined.startKm)} to ${formatKm(combined.endKm)})`
+    : `${count} ${plural} found, but none inside the dry stretch`;
+}
+
 /** Sidebar summary: distance, count, worst gap, and the stops in ride order. */
 function renderSummary(points) {
   if (!summaryEl) return;
@@ -366,6 +408,11 @@ function renderSummary(points) {
   dryStretchValueEl.textContent = points.length
     ? `${formatKm(dry.gapKm)} km — km ${formatKm(dry.startKm)} to ${formatKm(dry.endKm)} (${severity.note})`
     : `${formatKm(dry.gapKm)} km — no water found on this route`;
+
+  // The reason refill stops exist: show what they do to the worst gap. Kept as
+  // a separate line rather than folded into the headline number, because a
+  // fuel station is not the same promise as a tagged tap.
+  renderRefillEffect(dry);
 
   waterListEl.replaceChildren();
   for (const p of points) {
@@ -545,6 +592,67 @@ async function saveRoute(points) {
   }
 }
 
+/**
+ * Refill stops, drawn per confidence tier.
+ *
+ * Each popup leads with what to expect on arrival, because the whole point of
+ * the tier is that you plan differently for a tagged tap than for a cemetery.
+ */
+function renderRefillMarkers(points, animate = false) {
+  refillLayer.clearLayers();
+  points.forEach((p, idx) => {
+    const lat = p.lat ?? p.center?.lat;
+    const lon = p.lon ?? p.center?.lon;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+    const tags = p.tags || {};
+    const kind = refillLabel(tags);
+    const confidence = refillConfidence(tags);
+
+    const popup = document.createElement('div');
+    const title = document.createElement('b');
+    title.textContent = tags.name || kind;
+    popup.appendChild(title);
+
+    const addLine = (text, className) => {
+      if (!text) return;
+      const line = document.createElement('div');
+      if (className) line.className = className;
+      line.textContent = text;
+      popup.appendChild(line);
+    };
+    if (tags.name) addLine(kind);
+    addLine(refillExpectation(tags));
+    addLine([
+      Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : null,
+      Number.isFinite(p._distanceM) ? `${Math.round(p._distanceM)} m off route` : null
+    ].filter(Boolean).join(' · '));
+    addLine(tags.opening_hours ? `Hours: ${tags.opening_hours}` : null);
+
+    const mapsLink = document.createElement('a');
+    mapsLink.href = `https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lon.toFixed(5)}`;
+    mapsLink.target = '_blank';
+    mapsLink.rel = 'noopener';
+    mapsLink.textContent = 'Open in Google Maps';
+    popup.appendChild(mapsLink);
+
+    const marker = L.marker([lat, lon], { title: `${tags.name || kind} — ${refillExpectation(tags)}`, icon: refillIcon(confidence) })
+      .bindPopup(popup)
+      .addTo(refillLayer);
+    if (animate) {
+      marker.on('add', () => {
+        requestAnimationFrame(() => {
+          const el = marker.getElement();
+          if (el) {
+            el.classList.add('drop-anim');
+            el.style.animationDelay = `${Math.min(idx * 15, 600)}ms`;
+          }
+        });
+      });
+    }
+  });
+}
+
 async function renderCoffeeMarkers(points, animate = false) {
   coffeeLayer.clearLayers();
   points.forEach((p, idx) => {
@@ -651,12 +759,16 @@ function resetApp() {
       routeLayer = null;
     }
     if (waterLayer) { waterLayer.clearLayers(); }
+    if (refillLayer) { refillLayer.clearLayers(); }
     if (coffeeLayer) { coffeeLayer.clearLayers(); }
     // Reset state
     currentRouteGeoJSON = null;
     originalGpxText = '';
     foundWaterPoints = [];
     foundCoffeePoints = [];
+    foundRefillPoints = [];
+    nearRefillPoints = [];
+    lastNearWaterPoints = [];
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
     currentRouteIndex = null;
@@ -665,6 +777,7 @@ function resetApp() {
     // Hide the route-specific panels rather than leaving stale numbers up
     if (summaryEl) summaryEl.hidden = true;
     if (waterListEl) waterListEl.replaceChildren();
+    if (refillEffectEl) { refillEffectEl.hidden = true; refillEffectEl.textContent = ''; }
     if (profilePanel) profilePanel.hidden = true;
     if (profileSvg) profileSvg.replaceChildren();
     // Clear inputs and status
@@ -819,6 +932,7 @@ async function handleRouteFile(file) {
     // Ride order, not proximity order: this is the sequence you meet them in.
     const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
     renderWaterMarkers(near, true);
+    lastNearWaterPoints = near;
     renderSummary(near);
     renderProfile(near);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
@@ -878,9 +992,15 @@ if (radiusSelect) {
       if (foundWaterPoints.length) {
         const nearW = sortPointsAlongRoute(filterPointsNearRoute(routeFC, foundWaterPoints, selectedRadiusMeters, currentRouteIndex));
         renderWaterMarkers(nearW, true);
+        lastNearWaterPoints = nearW;
         renderSummary(nearW);
         renderProfile(nearW);
         msgs.push(`water ${nearW.length}/${foundWaterPoints.length}`);
+      }
+      if (foundRefillPoints.length) {
+        nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
+        renderRefillMarkers(nearRefillPoints, true);
+        msgs.push(`refill ${nearRefillPoints.length}/${foundRefillPoints.length}`);
       }
       if (foundCoffeePoints.length) {
         const nearC = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
@@ -902,6 +1022,34 @@ if (navNewBtn) {
   navNewBtn.addEventListener('click', (e) => {
     e.preventDefault();
     resetApp();
+  });
+}
+
+if (navRefillBtn) {
+  navRefillBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      setError('');
+      if (!routeLayer) { setError('Please load a GPX route first.'); return; }
+      const routeFC = currentRouteAsFeatureCollection();
+      const bbox = computeBBoxFromGeoJSON(routeFC);
+      setStatus('Querying Overpass for refill stops …');
+      showLoading(true);
+      const results = await fetchOSMRefillPointsAdaptive(bbox, (done) => {
+        setStatus(`Querying Overpass for refill stops … (${done})`);
+      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      foundRefillPoints = results || [];
+      nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
+      renderRefillMarkers(nearRefillPoints, true);
+      renderSummary(lastNearWaterPoints);
+      setStatus(`Found ${nearRefillPoints.length} near-route refill stops (${foundRefillPoints.length} total).`);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || String(err));
+      setStatus('');
+    } finally {
+      showLoading(false);
+    }
   });
 }
 
@@ -975,6 +1123,15 @@ document.addEventListener('keydown', (e) => {
     if (downloadBtn && !downloadBtn.disabled) {
       e.preventDefault();
       downloadBtn.click();
+      return;
+    }
+  }
+
+  // 'F' triggers the refill-stop search
+  if (!isTyping && (e.key === 'F' || e.key === 'f')) {
+    if (navRefillBtn) {
+      e.preventDefault();
+      navRefillBtn.click();
       return;
     }
   }

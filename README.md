@@ -12,6 +12,9 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 - Interactive map with your route, water markers, and optional coffee markers
 - Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
 - Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits (water and coffee)
+- Refill stops: fuel stations, shops, campgrounds, public toilets and cemetery taps,
+  graded by how sure you can be of getting water, for the rural routes where
+  `amenity=drinking_water` is thin on the ground
 - Water points reported by position along the route (km 47), not just how far off it they sit
 - Longest dry stretch called out, including the run-in from the start and run-out to the finish
 - Elevation strip under the map with a tick per water point and the dry stretch shaded
@@ -78,6 +81,10 @@ Notes:
   - Computes a bounding box for the route
   - Queries Overpass for potable water: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`, `amenity=water_point`, potable `amenity=fountain` / `man_made=water_well`, and `drinking_water=yes|compatible` (excludes `drinking_water=no`)
   - Optional coffee search: `amenity=cafe`, `shop=coffee`, restaurants with coffee-related cuisine; ranked by corridor distance plus OSM signals (name/brand, cuisine, hours, website)
+  - Optional refill search: `amenity=fuel`, `shop=convenience|supermarket`, `amenity=toilets`,
+    `tourism=camp_site|picnic_site|wilderness_hut|alpine_hut`, cemeteries and water points.
+    Each is graded `certain` (tagged as drinking water), `likely` (staffed, ask inside) or
+    `maybe`, and ranked by that grade before distance
   - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
   - Split quads are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
@@ -204,7 +211,7 @@ The Express server exposes a few endpoints:
 - `GET /app.js`, `GET /styles.css`, `GET /osmApi.mjs`, `GET /test.html` – static assets
 - `GET /health` – simple health check
 - `POST /api/overpass` – Overpass proxy
-  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" }`
+  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" | "refill" }`
   - The Overpass QL is built server-side from these two inputs; client-supplied
     query text is never forwarded, so the endpoint cannot be used as an open relay
   - Same-origin requests only; a bbox spanning more than 12° on a side is rejected

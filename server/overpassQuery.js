@@ -9,7 +9,7 @@
  */
 
 /** Kinds a client may ask for. Anything else is rejected. */
-const QUERY_KINDS = Object.freeze(['water', 'coffee']);
+const QUERY_KINDS = Object.freeze(['water', 'coffee', 'refill']);
 
 const COFFEE_CUISINE_RE = 'coffee|cafe|coffee_shop|espresso';
 
@@ -72,9 +72,44 @@ ${forEachElementType(selectors, bboxPart(b))}
   `;
 }
 
+/**
+ * Places a rider can top up bottles that are not tagged as drinking water.
+ *
+ * Outside cities amenity=drinking_water is sparse: on the archived 121 km
+ * Windy Butano route the app found 8 water points, and 111 km through the
+ * Santa Cruz mountains found 12, against 39 per 10 km for a run through a
+ * city park. Riders bridge those gaps at fuel stations, shops, campgrounds
+ * and cemetery taps, none of which the water query asks for.
+ *
+ * Cafes are deliberately absent: the coffee search already covers hospitality,
+ * and duplicating it here would put the same pins on two layers.
+ */
+function buildOverpassRefillQuery(b) {
+  const selectors = [
+    '["amenity"="fuel"]',
+    '["shop"~"^(convenience|supermarket)$"]',
+    '["amenity"="toilets"]',
+    '["tourism"~"^(camp_site|picnic_site|wilderness_hut|alpine_hut)$"]',
+    // A tap by the gate is standard in much of Europe and often the only
+    // water for miles.
+    '["amenity"="grave_yard"]',
+    '["landuse"="cemetery"]',
+    '["amenity"="water_point"]',
+    '["waterway"="water_point"]'
+  ];
+  return `
+    [out:xml][timeout:25];
+    (
+${forEachElementType(selectors, bboxPart(b))}
+    );
+    out body center qt;
+  `;
+}
+
 const BUILDERS = Object.freeze({
   water: buildOverpassWaterQuery,
-  coffee: buildOverpassCoffeeQuery
+  coffee: buildOverpassCoffeeQuery,
+  refill: buildOverpassRefillQuery
 });
 
 /**
@@ -91,5 +126,6 @@ module.exports = {
   QUERY_KINDS,
   buildOverpassWaterQuery,
   buildOverpassCoffeeQuery,
+  buildOverpassRefillQuery,
   buildQueryForKind
 };
