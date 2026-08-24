@@ -302,6 +302,16 @@ export function filterPointsNearRoute(geojsonRoute, points, maxMeters, routeInde
   return result;
 }
 
+/**
+ * Format a distance for display: one decimal below 100 km, whole numbers
+ * above. Shared so the sidebar, the popups and the exported waypoint names
+ * all read the same.
+ */
+export function formatKm(km) {
+  if (!Number.isFinite(km)) return '—';
+  return km >= 100 ? String(Math.round(km)) : km.toFixed(1);
+}
+
 /** Order by position along the route, which is the order they are ridden in. */
 export function sortPointsAlongRoute(points) {
   return [...points].sort((a, b) => (a._alongKm ?? Infinity) - (b._alongKm ?? Infinity));

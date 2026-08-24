@@ -217,7 +217,9 @@ The Express server exposes a few endpoints:
 ### Routes persistence API
 
 - `POST /api/routes` – Save an uploaded route
-  - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount }`
+  - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount, waterPoints }`
+  - The enriched GPX is not uploaded or stored: it is rebuilt from the original
+    plus the water points whenever it is downloaded
   - Same-origin requests only; GPX content and metadata are validated
   - Original GPX is limited to 8 MB and enriched GPX to 12 MB
   - Returns: `{ ok: true, id }`
@@ -326,7 +328,9 @@ Modern Chromium, Firefox, and Safari. The app relies on ES modules and the Fetch
 
 - `npm start` – Start the Express proxy and serve the app on `http://localhost:3000`
 - `npm run dev` – Start with Node's built-in watch mode
-- `npm test` – Run the security validation tests
+- `npm test` – Run the test suite
+- `npm run db:reclaim` – Report the space held by stored enriched GPX copies;
+  pass `-- --apply` to clear the regenerable ones and compact the database
 
 ---
 

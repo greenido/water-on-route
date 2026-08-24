@@ -61,6 +61,7 @@ const {
 } = require('./security');
 const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
 const { OverpassCache, cacheKey } = require('./overpassCache');
+const { enrichedGpxForRow } = require('./enrichedGpx');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -212,6 +213,10 @@ const STATIC_ASSETS = {
 for (const [route, { file, type }] of Object.entries(STATIC_ASSETS)) {
   app.get(route, (_req, res) => {
     res.type(type);
+    // The client modules are versioned by query string in index.html, but a
+    // stale bundle is worse than a revalidation round-trip: browsers were
+    // holding an old app.js across deploys because nothing told them not to.
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(__dirname, file));
   });
 }
@@ -279,12 +284,12 @@ app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res)
     if (!validation.ok) {
       return res.status(400).json({ error: validation.error });
     }
-    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, enrichedGpxText } = validation.value;
+    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints } = validation.value;
     const fileSize = Buffer.byteLength(gpxText, 'utf8');
     // Store only the coarse network, never the full address: a GPX track plus a
     // full IP identifies a person, and this endpoint takes no authentication.
     const clientIp = anonymizeIp(req.ip || req.socket?.remoteAddress || null);
-    const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText });
+    const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints });
     // One line per upload rather than three; the details are in the row.
     console.log('[POST /api/routes] saved', { id: result.id, filename, fileSize, routeKm, waypointsCount });
     return res.json({ ok: true, id: result.id });
@@ -411,12 +416,14 @@ app.get('/api/routes/:id/enriched.gpx', adminLimiter, requireBasicAuth, async (r
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).send('Invalid id');
     const row = await getRouteById(id);
-    if (!row || !row.enrichedGpxText) return res.status(404).send('Enriched GPX not found');
+    // Older rows carry a stored copy; newer ones are rebuilt from the original.
+    const enriched = enrichedGpxForRow(row);
+    if (!enriched) return res.status(404).send('Enriched GPX not found');
     const base = (row.filename && row.filename.replace(/[^a-zA-Z0-9_.-]+/g, '_').replace(/\.gpx$/i, '')) || `route-${id}`;
     const fname = `${base}-enriched.gpx`;
     res.setHeader('Content-Type', 'application/gpx+xml; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-    return res.send(row.enrichedGpxText);
+    return res.send(enriched);
   } catch (e) {
     console.error(e);
     return res.status(500).send('Failed to download');
@@ -476,8 +483,9 @@ app.get('/api/routes/all.zip', adminLimiter, requireBasicAuth, async (_req, res)
         if (full.gpxText) {
           archive.append(full.gpxText, { name: `${baseSafe}.gpx` });
         }
-        if (full.enrichedGpxText) {
-          archive.append(full.enrichedGpxText, { name: `${baseSafe}-enriched.gpx` });
+        const enriched = enrichedGpxForRow(full);
+        if (enriched) {
+          archive.append(enriched, { name: `${baseSafe}-enriched.gpx` });
         }
       } catch (e) {
         console.warn('[GET /api/routes/all.zip] skipping route due to error', { id, error: e && e.message });

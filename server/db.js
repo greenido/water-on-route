@@ -21,7 +21,7 @@ const { clampListLimit, clampListOffset } = require('./pagination');
 // Per-operation tracing is useful when a Fly volume misbehaves and pure noise
 // the rest of the time. Errors and warnings always log; this gates the rest.
 const DEBUG_DB = process.env.DEBUG_DB === 'true';
-const debugLog = DEBUG_DB ? (...args) => debugLog(...args) : () => {};
+const debugLog = DEBUG_DB ? (...args) => console.debug(...args) : () => {};
 
 // Prefer project data directory in development, and /data in production (Fly volumes)
 const PROJECT_DATA_DIR = path.join(__dirname, '..', 'data');
@@ -135,6 +135,10 @@ function migrateSchema() {
       if (!cols.has('client_ip')) migrations.push(`ALTER TABLE routes ADD COLUMN client_ip TEXT`);
       if (!cols.has('water_points_json')) migrations.push(`ALTER TABLE routes ADD COLUMN water_points_json TEXT`);
       if (!cols.has('enriched_gpx_text')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_gpx_text TEXT`);
+      // Set by scripts/reclaim-enriched.js once it has verified that rebuilding
+      // reproduces the archived file, so the download path can rebuild rows
+      // whose points predate the _distanceM annotation.
+      if (!cols.has('enriched_regenerable')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_regenerable INTEGER NOT NULL DEFAULT 0`);
       // The listing always sorts by uploaded_at; without this every page is a
       // full scan plus a sort of the whole table.
       migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_uploaded_at ON routes (uploaded_at DESC, id DESC)`);
@@ -157,14 +161,17 @@ function migrateSchema() {
   });
 }
 
-function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, enrichedGpxText }) {
+// enriched_gpx_text is intentionally not written: it is derivable from
+// gpx_text plus water_points_json and is rebuilt on download. The column stays
+// so existing rows keep serving their stored copy until reclaimed.
+function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints }) {
   const startTime = Date.now();
   debugLog('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
   return new Promise((resolve, reject) => {
-    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, enriched_gpx_text)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
     const waterJson = waterPoints ? JSON.stringify(waterPoints) : null;
-    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson, enrichedGpxText || null], function(err) {
+    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson], function(err) {
       if (err) {
         const elapsedMs = Date.now() - startTime;
         console.error('[db.insertRoute] failed', { elapsedMs, error: err });
@@ -201,7 +208,20 @@ function listRoutes({ limit, offset } = {}) {
   return new Promise((resolve, reject) => {
     db.all(
       `SELECT id, filename, file_size, bbox, route_km, waypoints_count, uploaded_at, client_ip,
-              enriched_gpx_text IS NOT NULL AS has_enriched
+              -- An enriched download is available either from the stored copy
+              -- (older rows) or by rebuilding it. Rebuilding needs every point
+              -- to carry _distanceM, which marks it as the near-route
+              -- selection; legacy rows stored the whole bbox instead and would
+              -- otherwise offer a link that 404s. Mirrors
+              -- isNearRouteSelection in server/enrichedGpx.js.
+              (enriched_gpx_text IS NOT NULL
+               OR enriched_regenerable = 1
+               OR (json_valid(water_points_json)
+                   AND json_array_length(water_points_json) > 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM json_each(routes.water_points_json)
+                     WHERE json_extract(value, '$._distanceM') IS NULL
+                   ))) AS has_enriched
        FROM routes
        ORDER BY uploaded_at DESC, id DESC
        LIMIT ? OFFSET ?`,
@@ -245,7 +265,7 @@ function getRouteById(id) {
   const startTime = Date.now();
   debugLog('[db.getRouteById] start', { id });
   return new Promise((resolve, reject) => {
-    db.get(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, water_points_json, uploaded_at, client_ip FROM routes WHERE id = ?`, [id], (err, row) => {
+    db.get(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, enriched_regenerable, water_points_json, uploaded_at, client_ip FROM routes WHERE id = ?`, [id], (err, row) => {
       if (err) {
         const elapsedMs = Date.now() - startTime;
         console.error('[db.getRouteById] failed', { id, elapsedMs, error: err });
@@ -265,6 +285,7 @@ function getRouteById(id) {
         waypointsCount: row.waypoints_count,
         gpxText: row.gpx_text,
         enrichedGpxText: row.enriched_gpx_text,
+        enrichedRegenerable: !!row.enriched_regenerable,
         waterPoints: safeParseJson(row.water_points_json),
         uploadedAt: row.uploaded_at,
         clientIp: row.client_ip
