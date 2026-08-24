@@ -12,7 +12,13 @@ import {
   rankCoffeePoints,
   sortPointsByDistance,
   fetchOverpassPointsAdaptive,
-  createLimiter
+  createLimiter,
+  isRefillTags,
+  refillConfidence,
+  refillLabel,
+  refillExpectation,
+  rankRefillPoints,
+  fetchOSMRefillPointsAdaptive
 } from '../osmApi.mjs';
 
 const BBOX = { minlat: 37, minlon: -122.4, maxlat: 37.4, maxlon: -122 };
@@ -323,4 +329,126 @@ test('deep recursive splitting does not deadlock under a small cap', async () =>
 
   assert.ok(calls > 20, `expected deep splitting, got ${calls} calls`);
   assert.ok(points.length > 0);
+});
+
+test('isRefillTags accepts the stops a rider can actually use', () => {
+  assert.ok(isRefillTags({ amenity: 'fuel' }));
+  assert.ok(isRefillTags({ shop: 'convenience' }));
+  assert.ok(isRefillTags({ shop: 'supermarket' }));
+  assert.ok(isRefillTags({ amenity: 'toilets' }));
+  assert.ok(isRefillTags({ tourism: 'camp_site' }));
+  assert.ok(isRefillTags({ tourism: 'alpine_hut' }));
+  assert.ok(isRefillTags({ amenity: 'grave_yard' }));
+  assert.ok(isRefillTags({ landuse: 'cemetery' }));
+});
+
+test('isRefillTags leaves cafes to the coffee layer', () => {
+  assert.equal(isRefillTags({ amenity: 'cafe' }), false);
+  assert.equal(isRefillTags({ amenity: 'restaurant' }), false);
+  assert.equal(isRefillTags({ shop: 'coffee' }), false);
+});
+
+test('drinking_water=no disqualifies a refill stop outright', () => {
+  assert.equal(isRefillTags({ amenity: 'fuel', drinking_water: 'no' }), false);
+  assert.equal(isRefillTags({ shop: 'supermarket', drinking_water: 'no' }), false);
+  assert.equal(isRefillTags(null), false);
+  assert.equal(isRefillTags('fuel'), false);
+});
+
+test('confidence separates a tagged tap from an educated guess', () => {
+  // Explicit tagging always wins, whatever the feature is.
+  assert.equal(refillConfidence({ amenity: 'toilets', drinking_water: 'yes' }), 'certain');
+  assert.equal(refillConfidence({ amenity: 'grave_yard', drinking_water: 'compatible' }), 'certain');
+  assert.equal(refillConfidence({ amenity: 'water_point' }), 'certain');
+  // Staffed places you can walk into and ask.
+  assert.equal(refillConfidence({ amenity: 'fuel' }), 'likely');
+  assert.equal(refillConfidence({ shop: 'convenience' }), 'likely');
+  assert.equal(refillConfidence({ tourism: 'camp_site' }), 'likely');
+  // Everything else is a gamble and must say so.
+  assert.equal(refillConfidence({ amenity: 'toilets' }), 'maybe');
+  assert.equal(refillConfidence({ amenity: 'grave_yard' }), 'maybe');
+  assert.equal(refillConfidence({ tourism: 'picnic_site' }), 'maybe');
+  assert.equal(refillConfidence(undefined), 'maybe');
+});
+
+test('every refill kind has a human label and an expectation', () => {
+  const kinds = [
+    { amenity: 'fuel' }, { shop: 'convenience' }, { shop: 'supermarket' },
+    { amenity: 'toilets' }, { tourism: 'camp_site' }, { tourism: 'picnic_site' },
+    { tourism: 'wilderness_hut' }, { tourism: 'alpine_hut' },
+    { amenity: 'grave_yard' }, { landuse: 'cemetery' }, { amenity: 'water_point' }
+  ];
+  for (const tags of kinds) {
+    assert.notEqual(refillLabel(tags), 'Refill stop', `unlabelled: ${JSON.stringify(tags)}`);
+    assert.ok(refillExpectation(tags).length > 0);
+  }
+  assert.equal(refillLabel({ amenity: 'something_else' }), 'Refill stop', 'unknown kinds still get a label');
+});
+
+test('the expectation line matches the confidence tier', () => {
+  assert.match(refillExpectation({ amenity: 'water_point' }), /drinking water/i);
+  assert.match(refillExpectation({ amenity: 'fuel' }), /ask inside/i);
+  assert.match(refillExpectation({ amenity: 'grave_yard' }), /not guaranteed/i);
+});
+
+test('rankRefillPoints puts certainty ahead of proximity', () => {
+  // A sure tap 200 m away beats a maybe at 40 m: the detour is cheaper than
+  // arriving at a locked cemetery gate.
+  const points = [
+    { id: 'maybe-close', tags: { amenity: 'grave_yard' }, _distanceM: 40 },
+    { id: 'certain-far', tags: { amenity: 'water_point' }, _distanceM: 200 },
+    { id: 'likely-mid', tags: { amenity: 'fuel' }, _distanceM: 120 }
+  ];
+  assert.deepEqual(rankRefillPoints(points).map(p => p.id), ['certain-far', 'likely-mid', 'maybe-close']);
+});
+
+test('rankRefillPoints breaks ties by distance and does not mutate', () => {
+  const points = [
+    { id: 'far', tags: { amenity: 'fuel' }, _distanceM: 300 },
+    { id: 'near', tags: { shop: 'convenience' }, _distanceM: 30 }
+  ];
+  assert.deepEqual(rankRefillPoints(points).map(p => p.id), ['near', 'far']);
+  assert.equal(points[0].id, 'far');
+});
+
+/**
+ * Minimal stand-in for the browser DOM, so the exported fetch helpers can be
+ * exercised as the app calls them rather than through their internals. Models
+ * only what parseOsmXmlGeneric touches: elements with attributes and <tag>
+ * children.
+ */
+function withStubbedDom(nodes, run) {
+  const element = ({ id, lat, lon, tags }) => ({
+    getAttribute: (name) => ({ id, lat, lon })[name],
+    getElementsByTagName: (name) => name === 'tag'
+      ? Object.entries(tags || {}).map(([k, v]) => ({ getAttribute: (a) => (a === 'k' ? k : v) }))
+      : []
+  });
+  const previous = globalThis.DOMParser;
+  globalThis.DOMParser = class {
+    parseFromString() {
+      return { getElementsByTagName: (name) => (name === 'node' ? nodes.map(element) : []) };
+    }
+  };
+  return Promise.resolve(run()).finally(() => { globalThis.DOMParser = previous; });
+}
+
+test('the client asks the proxy for the refill kind and keeps only refill stops', async () => {
+  const sent = [];
+  const fetchImpl = async (_url, options) => { sent.push(JSON.parse(options.body)); return reply(200, '<osm/>'); };
+
+  const points = await withStubbedDom(
+    [
+      { id: 1, lat: 37.1, lon: -122.1, tags: { amenity: 'fuel', name: 'Gas' } },
+      { id: 2, lat: 37.2, lon: -122.2, tags: { amenity: 'cafe' } },
+      { id: 3, lat: 37.3, lon: -122.3, tags: { amenity: 'fuel', drinking_water: 'no' } }
+    ],
+    () => fetchOSMRefillPointsAdaptive(BBOX, null, { fetchImpl })
+  );
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'refill');
+  assert.deepEqual(sent[0].bbox, BBOX);
+  // The cafe belongs to the coffee layer and the explicit no is disqualifying.
+  assert.deepEqual(points.map(p => p.id), [1]);
 });

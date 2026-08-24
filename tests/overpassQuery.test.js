@@ -5,6 +5,7 @@ const {
   QUERY_KINDS,
   buildOverpassWaterQuery,
   buildOverpassCoffeeQuery,
+  buildOverpassRefillQuery,
   buildQueryForKind
 } = require('../server/overpassQuery');
 
@@ -56,7 +57,6 @@ test('every query asks for centers so ways and relations are placeable', () => {
 });
 
 test('buildQueryForKind dispatches on the declared kinds', () => {
-  assert.deepEqual([...QUERY_KINDS].sort(), ['coffee', 'water']);
   assert.equal(buildQueryForKind('water', BBOX), buildOverpassWaterQuery(BBOX));
   assert.equal(buildQueryForKind('coffee', BBOX), buildOverpassCoffeeQuery(BBOX));
 });
@@ -74,4 +74,34 @@ test('no client-controlled text can reach the query', () => {
   assert.ok(!query.includes('undefined'));
   assert.ok(!query.includes('[object'));
   assert.match(query, /^\s*\[out:xml\]\[timeout:25\];/);
+});
+
+test('refill query asks for the stops a rider actually uses', () => {
+  const query = buildOverpassRefillQuery(BBOX);
+  const expected = [
+    '["amenity"="fuel"]',
+    '["shop"~"^(convenience|supermarket)$"]',
+    '["amenity"="toilets"]',
+    '["tourism"~"^(camp_site|picnic_site|wilderness_hut|alpine_hut)$"]',
+    '["amenity"="grave_yard"]',
+    '["landuse"="cemetery"]'
+  ];
+  for (const type of ['node', 'way', 'relation']) {
+    for (const selector of expected) {
+      assert.ok(query.includes(`${type}${selector}`), `missing ${type}${selector}`);
+    }
+  }
+  assert.ok(query.includes('out body center qt;'), 'ways and relations need centers to be placeable');
+});
+
+test('refill query does not duplicate the coffee layer', () => {
+  const query = buildOverpassRefillQuery(BBOX);
+  assert.ok(!query.includes('"amenity"="cafe"'));
+  assert.ok(!query.includes('"amenity"="restaurant"'));
+});
+
+test('refill is a first-class kind alongside water and coffee', () => {
+  assert.deepEqual([...QUERY_KINDS].sort(), ['coffee', 'refill', 'water']);
+  assert.equal(buildQueryForKind('refill', BBOX), buildOverpassRefillQuery(BBOX));
+  assert.ok(buildOverpassRefillQuery(BBOX).includes('(37,-122.4,37.4,-122)'));
 });
