@@ -137,7 +137,10 @@ function migrateSchema() {
       if (!cols.has('client_ip')) migrations.push(`ALTER TABLE routes ADD COLUMN client_ip TEXT`);
       if (!cols.has('water_points_json')) migrations.push(`ALTER TABLE routes ADD COLUMN water_points_json TEXT`);
       if (!cols.has('enriched_gpx_text')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_gpx_text TEXT`);
-      if (!cols.has('share_token')) migrations.push(`ALTER TABLE routes ADD COLUMN share_token TEXT UNIQUE`);
+      // SQLite rejects ADD COLUMN ... UNIQUE on a non-empty table
+      // ("Cannot add a UNIQUE column"). Add the column first; uniqueness
+      // comes from idx_routes_share_token below.
+      if (!cols.has('share_token')) migrations.push(`ALTER TABLE routes ADD COLUMN share_token TEXT`);
       // Set by scripts/reclaim-enriched.js once it has verified that rebuilding
       // reproduces the archived file, so the download path can rebuild rows
       // whose points predate the _distanceM annotation.
