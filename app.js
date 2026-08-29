@@ -52,6 +52,7 @@ const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
 let loadingEl = document.getElementById('loading');
 const downloadBtn = document.getElementById('downloadBtn');
+const shareBtn = document.getElementById('shareBtn');
 const radiusSelect = document.getElementById('radiusSelect');
 const saveRouteToggle = document.getElementById('saveRouteToggle');
 const summaryEl = document.getElementById('summary');
@@ -239,6 +240,7 @@ let layersControl = null;
 // Guards against re-uploading the same route on every radius change.
 let currentRouteFilename = 'route.gpx';
 let savedRouteForFile = false;
+let currentShareToken = null;
 // Route projected once per file; radius changes and exports reuse it.
 let currentRouteIndex = null;
 let currentRouteKm = 0;
@@ -585,10 +587,103 @@ async function saveRoute(points) {
       body: JSON.stringify(payload)
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json().catch(() => null);
+    if (data && data.shareToken) {
+      currentShareToken = data.shareToken;
+    }
   } catch (err) {
     // Saving is best-effort telemetry; never block the user's map on it.
     savedRouteForFile = false;
     console.warn('[saveRoute] failed to save route', err);
+  }
+}
+
+/**
+ * Ensures the currently loaded route is persisted to obtain a shareToken.
+ * Can be called explicitly when user clicks Share even if automatic saving is off.
+ */
+async function ensureRouteSaved() {
+  if (currentShareToken) return currentShareToken;
+  if (!currentRouteGeoJSON || !originalGpxText) return null;
+  const points = lastNearWaterPoints || [];
+  const payload = {
+    filename: currentRouteFilename,
+    gpxText: originalGpxText,
+    bbox: computeBBoxFromGeoJSON(currentRouteGeoJSON),
+    routeKm: Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2)),
+    waypointsCount: points.length,
+    waterPoints: points
+  };
+  const resp = await fetch('/api/routes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (data && data.shareToken) {
+    currentShareToken = data.shareToken;
+    savedRouteForFile = true;
+    return currentShareToken;
+  }
+  return null;
+}
+
+/**
+ * Share the active route by copying or opening the native share sheet.
+ */
+async function shareRoute() {
+  try {
+    if (!routeLayer || !currentRouteGeoJSON) {
+      setError('Please load a GPX route first.');
+      return;
+    }
+    setError('');
+    setStatus('Preparing share link …');
+    const token = await ensureRouteSaved();
+    if (!token) {
+      setError('Could not generate share link.');
+      setStatus('');
+      return;
+    }
+    const shareUrl = new URL(window.location.href);
+    shareUrl.searchParams.set('route', token);
+    const urlStr = shareUrl.toString();
+
+    try {
+      window.history.replaceState({}, '', urlStr);
+    } catch (_) {}
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `GPX Water Mapper — ${currentRouteFilename}`,
+          text: `Check out this route on GPX Water Mapper (${currentRouteKm.toFixed(1)} km, ${lastNearWaterPoints.length} water stops)`,
+          url: urlStr
+        });
+        setStatus('Route shared!');
+        showToast('Route link shared!');
+        return;
+      } catch (shareErr) {
+        if (shareErr && shareErr.name === 'AbortError') {
+          setStatus('');
+          return;
+        }
+      }
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(urlStr);
+      showToast('Share link copied to clipboard!');
+      setStatus('Share link copied to clipboard.');
+    } else {
+      prompt('Copy share link:', urlStr);
+      setStatus('Share link ready.');
+    }
+  } catch (err) {
+    console.error('[shareRoute] failed', err);
+    setError('Failed to share route: ' + (err.message || String(err)));
+    setStatus('');
   }
 }
 
@@ -771,9 +866,21 @@ function resetApp() {
     lastNearWaterPoints = [];
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
+    currentShareToken = null;
     currentRouteIndex = null;
     currentRouteKm = 0;
     downloadBtn.disabled = true;
+    if (shareBtn) shareBtn.disabled = true;
+    // Clear route query param from URL if present
+    try {
+      const currentUrl = new URL(window.location.href);
+      if (currentUrl.searchParams.has('route')) {
+        currentUrl.searchParams.delete('route');
+        const newSearch = currentUrl.searchParams.toString();
+        const newUrl = currentUrl.pathname + (newSearch ? `?${newSearch}` : '') + currentUrl.hash;
+        window.history.replaceState({}, '', newUrl);
+      }
+    } catch (_) {}
     // Hide the route-specific panels rather than leaving stale numbers up
     if (summaryEl) summaryEl.hidden = true;
     if (waterListEl) waterListEl.replaceChildren();
@@ -907,6 +1014,80 @@ function storageFilenameFor(file) {
   return /\.fit$/i.test(name) ? name.replace(/\.fit$/i, '.gpx') : name;
 }
 
+async function loadSharedRoute(token) {
+  if (!token) return;
+  setError('');
+  setStatus('Loading shared route …');
+  showLoading(true);
+  try {
+    const resp = await fetch(`/api/shared-routes/${encodeURIComponent(token)}`);
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        throw new Error('Shared route not found or link has expired.');
+      }
+      throw new Error(`Failed to load shared route (HTTP ${resp.status})`);
+    }
+    const data = await resp.json();
+    if (!data || !data.gpxText) {
+      throw new Error('Shared route data is invalid.');
+    }
+
+    currentRouteFilename = data.filename || 'shared-route.gpx';
+    originalGpxText = data.gpxText;
+    currentShareToken = data.shareToken || token;
+    savedRouteForFile = true;
+
+    // Parse GPX to GeoJSON
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(data.gpxText, 'application/xml');
+    const geojson = toGeoJSON.gpx(xml);
+    if (!geojson || !geojson.features || geojson.features.length === 0) {
+      throw new Error('No features found in shared GPX.');
+    }
+
+    currentRouteGeoJSON = geojson;
+    renderRoute(geojson);
+    currentRouteIndex = buildRouteIndex(geojson);
+    currentRouteKm = currentRouteIndex.totalM / 1000;
+
+    const bbox = data.bbox && typeof data.bbox === 'object' && Number.isFinite(data.bbox.minlat)
+      ? data.bbox
+      : computeBBoxFromGeoJSON(geojson);
+
+    const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
+    setStatus(`Querying ${backend} for water points …`);
+    let results = [];
+    try {
+      results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
+        setStatus(`Querying ${backend} for water points … (${done})`);
+      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+    } catch (fetchErr) {
+      console.warn('[loadSharedRoute] Live OSM query failed, falling back to saved points', fetchErr);
+      if (Array.isArray(data.waterPoints) && data.waterPoints.length > 0) {
+        results = data.waterPoints;
+      } else {
+        throw fetchErr;
+      }
+    }
+
+    foundWaterPoints = results;
+    const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
+    renderWaterMarkers(near, true);
+    lastNearWaterPoints = near;
+    renderSummary(near);
+    renderProfile(near);
+    setStatus(`Loaded shared route: ${currentRouteFilename} (${near.length} near-route water points).`);
+    downloadBtn.disabled = false;
+    if (shareBtn) shareBtn.disabled = false;
+  } catch (e) {
+    console.error(e);
+    setError(e.message || String(e));
+    setStatus('Load a GPX or FIT file to begin.');
+  } finally {
+    showLoading(false);
+  }
+}
+
 async function handleRouteFile(file) {
   setError('');
   setStatus(`Parsing ${file.name} …`);
@@ -916,6 +1097,7 @@ async function handleRouteFile(file) {
   // A new file is a new route: allow exactly one save for it.
   currentRouteFilename = storageFilenameFor(file);
   savedRouteForFile = false;
+  currentShareToken = null;
   // Project the route once; every later radius change and export reuses this.
   currentRouteIndex = buildRouteIndex(geojson);
   currentRouteKm = currentRouteIndex.totalM / 1000;
@@ -937,6 +1119,7 @@ async function handleRouteFile(file) {
     renderProfile(near);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
+    if (shareBtn) shareBtn.disabled = false;
     // Save once, after the route is on screen, and never block rendering on it.
     saveRoute(near);
   } catch (e) {
@@ -971,6 +1154,12 @@ downloadBtn.addEventListener('click', () => {
     setError(e.message || String(e));
   }
 });
+
+if (shareBtn) {
+  shareBtn.addEventListener('click', () => {
+    shareRoute().catch(err => setError(err.message || String(err)));
+  });
+}
 
 setStatus('Load a GPX or FIT file to begin.');
 // Ensure loading overlay is hidden on initial load until a file is processed
@@ -1127,6 +1316,15 @@ document.addEventListener('keydown', (e) => {
     }
   }
 
+  // 'S' shares route link
+  if (!isTyping && (e.key === 'S' || e.key === 's')) {
+    if (shareBtn && !shareBtn.disabled) {
+      e.preventDefault();
+      shareBtn.click();
+      return;
+    }
+  }
+
   // 'F' triggers the refill-stop search
   if (!isTyping && (e.key === 'F' || e.key === 'f')) {
     if (navRefillBtn) {
@@ -1169,5 +1367,16 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+// Load shared route if ?route= token is present in URL
+try {
+  const initialRouteToken = new URLSearchParams(window.location.search).get('route');
+  if (initialRouteToken) {
+    loadSharedRoute(initialRouteToken).catch((err) => {
+      console.error('[initialRouteToken] failed to load shared route', err);
+    });
+  }
+} catch (_) {}
+
 
 

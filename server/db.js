@@ -15,6 +15,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
 const { clampListLimit, clampListOffset } = require('./pagination');
 
@@ -94,7 +95,8 @@ function initDatabase() {
           route_km REAL,
           waypoints_count INTEGER,
           gpx_text TEXT,
-          uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          share_token TEXT UNIQUE
         )`,
         (createErr) => {
           if (createErr) {
@@ -135,6 +137,7 @@ function migrateSchema() {
       if (!cols.has('client_ip')) migrations.push(`ALTER TABLE routes ADD COLUMN client_ip TEXT`);
       if (!cols.has('water_points_json')) migrations.push(`ALTER TABLE routes ADD COLUMN water_points_json TEXT`);
       if (!cols.has('enriched_gpx_text')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_gpx_text TEXT`);
+      if (!cols.has('share_token')) migrations.push(`ALTER TABLE routes ADD COLUMN share_token TEXT UNIQUE`);
       // Set by scripts/reclaim-enriched.js once it has verified that rebuilding
       // reproduces the archived file, so the download path can rebuild rows
       // whose points predate the _distanceM annotation.
@@ -142,6 +145,7 @@ function migrateSchema() {
       // The listing always sorts by uploaded_at; without this every page is a
       // full scan plus a sort of the whole table.
       migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_uploaded_at ON routes (uploaded_at DESC, id DESC)`);
+      migrations.push(`CREATE UNIQUE INDEX IF NOT EXISTS idx_routes_share_token ON routes (share_token)`);
       if (migrations.length === 0) {
         const elapsedMs = Date.now() - startTime;
         debugLog('[db.migrateSchema] no migrations needed', { elapsedMs });
@@ -164,22 +168,23 @@ function migrateSchema() {
 // enriched_gpx_text is intentionally not written: it is derivable from
 // gpx_text plus water_points_json and is rebuilt on download. The column stays
 // so existing rows keep serving their stored copy until reclaimed.
-function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints }) {
+function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, shareToken }) {
   const startTime = Date.now();
   debugLog('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
   return new Promise((resolve, reject) => {
-    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+    const token = shareToken || crypto.randomBytes(9).toString('base64url');
+    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, share_token)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const waterJson = waterPoints ? JSON.stringify(waterPoints) : null;
-    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson], function(err) {
+    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson, token], function(err) {
       if (err) {
         const elapsedMs = Date.now() - startTime;
         console.error('[db.insertRoute] failed', { elapsedMs, error: err });
         return reject(err);
       }
       const elapsedMs = Date.now() - startTime;
-      debugLog('[db.insertRoute] success', { id: this.lastID, elapsedMs });
-      resolve({ id: this.lastID });
+      debugLog('[db.insertRoute] success', { id: this.lastID, shareToken: token, elapsedMs });
+      resolve({ id: this.lastID, shareToken: token });
     });
   });
 }
@@ -265,7 +270,7 @@ function getRouteById(id) {
   const startTime = Date.now();
   debugLog('[db.getRouteById] start', { id });
   return new Promise((resolve, reject) => {
-    db.get(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, enriched_regenerable, water_points_json, uploaded_at, client_ip FROM routes WHERE id = ?`, [id], (err, row) => {
+    db.get(`SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, enriched_regenerable, water_points_json, uploaded_at, client_ip, share_token FROM routes WHERE id = ?`, [id], (err, row) => {
       if (err) {
         const elapsedMs = Date.now() - startTime;
         console.error('[db.getRouteById] failed', { id, elapsedMs, error: err });
@@ -288,12 +293,53 @@ function getRouteById(id) {
         enrichedRegenerable: !!row.enriched_regenerable,
         waterPoints: safeParseJson(row.water_points_json),
         uploadedAt: row.uploaded_at,
-        clientIp: row.client_ip
+        clientIp: row.client_ip,
+        shareToken: row.share_token
       };
       const elapsedMs = Date.now() - startTime;
       debugLog('[db.getRouteById] success', { id, hasEnriched: !!result.enrichedGpxText, hasWater: !!result.waterPoints, elapsedMs });
       resolve(result);
     });
+  });
+}
+
+function getRouteByShareToken(token) {
+  const startTime = Date.now();
+  debugLog('[db.getRouteByShareToken] start', { token });
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT id, filename, file_size, bbox, route_km, waypoints_count, gpx_text, enriched_gpx_text, enriched_regenerable, water_points_json, uploaded_at, share_token FROM routes WHERE share_token = ?`,
+      [token],
+      (err, row) => {
+        if (err) {
+          const elapsedMs = Date.now() - startTime;
+          console.error('[db.getRouteByShareToken] failed', { token, elapsedMs, error: err });
+          return reject(err);
+        }
+        if (!row) {
+          const elapsedMs = Date.now() - startTime;
+          debugLog('[db.getRouteByShareToken] not found', { token, elapsedMs });
+          return resolve(null);
+        }
+        const result = {
+          id: row.id,
+          filename: row.filename,
+          fileSize: row.file_size,
+          bbox: safeParseJson(row.bbox),
+          routeKm: row.route_km,
+          waypointsCount: row.waypoints_count,
+          gpxText: row.gpx_text,
+          enrichedGpxText: row.enriched_gpx_text,
+          enrichedRegenerable: !!row.enriched_regenerable,
+          waterPoints: safeParseJson(row.water_points_json),
+          uploadedAt: row.uploaded_at,
+          shareToken: row.share_token
+        };
+        const elapsedMs = Date.now() - startTime;
+        debugLog('[db.getRouteByShareToken] success', { id: result.id, token, elapsedMs });
+        resolve(result);
+      }
+    );
   });
 }
 
@@ -333,6 +379,7 @@ module.exports = {
   listRouteIds,
   countRoutes,
   getRouteById,
+  getRouteByShareToken,
   deleteRouteById
 };
 

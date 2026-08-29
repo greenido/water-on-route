@@ -218,11 +218,19 @@ function positiveInteger(value, fallback, minimum, maximum) {
   return parsed;
 }
 
+const SHARE_TOKEN_RE = /^[A-Za-z0-9_-]{6,64}$/;
+
+function validateShareToken(token) {
+  if (typeof token !== 'string') return false;
+  return SHARE_TOKEN_RE.test(token.trim());
+}
+
 module.exports = {
   MAX_GPX_BYTES,
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
+  validateShareToken,
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,

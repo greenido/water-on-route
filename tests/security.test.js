@@ -5,6 +5,7 @@ const {
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
+  validateShareToken,
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,
@@ -154,3 +155,22 @@ test('positiveInteger bounds numeric environment configuration', () => {
   assert.throws(() => positiveInteger('0', 20, 1, 100), /between 1 and 100/);
   assert.throws(() => positiveInteger('not-a-number', 20, 1, 100), /between 1 and 100/);
 });
+
+test('validateShareToken accepts valid base64url/alphanumeric tokens', () => {
+  assert.equal(validateShareToken('abcdef'), true);
+  assert.equal(validateShareToken('k8x2f9a1-zQ_'), true);
+  assert.equal(validateShareToken('A'.repeat(64)), true);
+});
+
+test('validateShareToken rejects invalid, malformed, or out-of-bound tokens', () => {
+  assert.equal(validateShareToken(undefined), false);
+  assert.equal(validateShareToken(null), false);
+  assert.equal(validateShareToken(''), false);
+  assert.equal(validateShareToken('abc'), false); // too short (< 6 chars)
+  assert.equal(validateShareToken('A'.repeat(65)), false); // too long (> 64 chars)
+  assert.equal(validateShareToken('abc/def+123='), false); // non-urlsafe characters
+  assert.equal(validateShareToken('abc def'), false); // space inside
+  assert.equal(validateShareToken('<script>'), false);
+  assert.equal(validateShareToken(123456), false);
+});
+

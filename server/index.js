@@ -42,6 +42,7 @@ const {
   listRouteIds,
   countRoutes,
   getRouteById,
+  getRouteByShareToken,
   deleteRouteById,
   DB_PATH
 } = require('./db');
@@ -54,6 +55,7 @@ const {
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
+  validateShareToken,
   isAllowedOrigin,
   positiveInteger,
   anonymizeIp,
@@ -291,11 +293,38 @@ app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res)
     const clientIp = anonymizeIp(req.ip || req.socket?.remoteAddress || null);
     const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints });
     // One line per upload rather than three; the details are in the row.
-    console.log('[POST /api/routes] saved', { id: result.id, filename, fileSize, routeKm, waypointsCount });
-    return res.json({ ok: true, id: result.id });
+    console.log('[POST /api/routes] saved', { id: result.id, shareToken: result.shareToken, filename, fileSize, routeKm, waypointsCount });
+    return res.json({ ok: true, id: result.id, shareToken: result.shareToken });
   } catch (e) {
     console.error('[POST /api/routes] Error:', e);
     return res.status(500).json({ error: 'Failed to save route' });
+  }
+});
+
+// API: Retrieve shared route by token (public, rate-limited)
+app.get('/api/shared-routes/:token', proxyLimiter, async (req, res) => {
+  try {
+    const token = req.params.token;
+    if (!validateShareToken(token)) {
+      return res.status(400).json({ error: 'Invalid share token' });
+    }
+    const row = await getRouteByShareToken(token);
+    if (!row) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+    return res.json({
+      ok: true,
+      filename: row.filename,
+      gpxText: row.gpxText,
+      bbox: row.bbox,
+      routeKm: row.routeKm,
+      waypointsCount: row.waypointsCount,
+      waterPoints: row.waterPoints,
+      shareToken: row.shareToken
+    });
+  } catch (e) {
+    console.error('[GET /api/shared-routes/:token] Error:', e);
+    return res.status(500).json({ error: 'Failed to retrieve shared route' });
   }
 });
 

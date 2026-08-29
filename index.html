@@ -70,10 +70,14 @@
         </p>
       </div>
 
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2">
         <button id="downloadBtn" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-sky-400 text-slate-900 font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-sky-300 transition" disabled>
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M12 16a1 1 0 0 1-.7-.29l-4-4a1 1 0 1 1 1.4-1.42L11 12.59V4a1 1 0 0 1 2 0v8.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-.7.29Z"/><path d="M5 20a1 1 0 0 1-1-1v-3a1 1 0 1 1 2 0v2h12v-2a1 1 0 1 1 2 0v3a1 1 0 0 1-1 1H5Z"/></svg>
           <span>Download enriched GPX</span>
+        </button>
+        <button id="shareBtn" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-700 transition" disabled title="Share route with others">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
+          <span>Share route</span>
         </button>
       </div>
 
@@ -159,6 +163,7 @@
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">L</kbd><span>Select GPX / FIT (open file)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">N</kbd><span>Clean map (reset)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">D</kbd><span>Download enriched GPX</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">S</kbd><span>Share route link</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">F</kbd><span>Find ⛽ refill stops</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">C</kbd><span>Press C (no modifiers) to trigger ☕ Search coffee</span></li>
           </ul>
