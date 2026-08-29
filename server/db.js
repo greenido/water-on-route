@@ -175,7 +175,9 @@ function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxTex
   const startTime = Date.now();
   debugLog('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
   return new Promise((resolve, reject) => {
-    const token = shareToken || crypto.randomBytes(9).toString('base64url');
+    // Hex, not base64url: Slack/markdown treat `_` as emphasis and split the
+    // URL, so a recipient opened ?route=ab instead of ?route=ab_cd… (HTTP 400).
+    const token = shareToken || crypto.randomBytes(16).toString('hex');
     const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, share_token)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const waterJson = waterPoints ? JSON.stringify(waterPoints) : null;

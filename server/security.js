@@ -225,12 +225,39 @@ function validateShareToken(token) {
   return SHARE_TOKEN_RE.test(token.trim());
 }
 
+/**
+ * Recover a share token from a URL/query value that chat apps, markdown, or
+ * copy-paste have decorated. Underscores in older base64url tokens were split
+ * by Slack/markdown, turning ?route=ab_cd into ?route=ab (HTTP 400: too short).
+ * Hex tokens avoid that; this still strips wrapping punctuation and tracking
+ * params so a pasted link does not 400 before the lookup.
+ *
+ * @param {unknown} token
+ * @returns {string|null}
+ */
+function parseShareToken(token) {
+  if (typeof token !== 'string') return null;
+  let value = token.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+  if (!value) return null;
+  value = value.split(/[?#&/]/)[0];
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    value = value.slice(1, -1);
+  }
+  value = value.replace(/^<+/, '').replace(/[>)"'\],.]+$/, '');
+  if (!SHARE_TOKEN_RE.test(value)) return null;
+  return value;
+}
+
 module.exports = {
   MAX_GPX_BYTES,
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
   validateShareToken,
+  parseShareToken,
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,

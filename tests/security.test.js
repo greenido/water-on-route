@@ -6,6 +6,7 @@ const {
   validateRoutePayload,
   validateTileCoordinates,
   validateShareToken,
+  parseShareToken,
   isAllowedOrigin,
   normalizeHttpUrl,
   positiveInteger,
@@ -172,5 +173,19 @@ test('validateShareToken rejects invalid, malformed, or out-of-bound tokens', ()
   assert.equal(validateShareToken('abc def'), false); // space inside
   assert.equal(validateShareToken('<script>'), false);
   assert.equal(validateShareToken(123456), false);
+});
+
+test('parseShareToken recovers tokens mangled by chat apps and copy-paste', () => {
+  const token = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4';
+  assert.equal(parseShareToken(token), token);
+  assert.equal(parseShareToken(`<${token}>`), token);
+  assert.equal(parseShareToken(`"${token}"`), token);
+  assert.equal(parseShareToken(`${token}).`), token);
+  assert.equal(parseShareToken(` ${token}\n`), token);
+  assert.equal(parseShareToken(`${token}?fbclid=IwAR0`), token);
+  assert.equal(parseShareToken(`${token}&utm_source=sms`), token);
+  assert.equal(parseShareToken(`${token}#18/37.7/-122.4`), token);
+  assert.equal(parseShareToken('abc'), null);
+  assert.equal(parseShareToken('<script>alert(1)</script>'), null);
 });
 

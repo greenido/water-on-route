@@ -646,7 +646,7 @@ async function shareRoute() {
       setStatus('');
       return;
     }
-    const shareUrl = new URL(window.location.href);
+    const shareUrl = new URL('/', window.location.origin);
     shareUrl.searchParams.set('route', token);
     const urlStr = shareUrl.toString();
 
@@ -1014,18 +1014,40 @@ function storageFilenameFor(file) {
   return /\.fit$/i.test(name) ? name.replace(/\.fit$/i, '.gpx') : name;
 }
 
+/** Mirrors server/security.parseShareToken — keep the two in sync. */
+function parseShareToken(token) {
+  if (typeof token !== 'string') return null;
+  let value = token.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+  if (!value) return null;
+  value = value.split(/[?#&/]/)[0];
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+    (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    value = value.slice(1, -1);
+  }
+  value = value.replace(/^<+/, '').replace(/[>)"'\],.]+$/, '');
+  return /^[A-Za-z0-9_-]{6,64}$/.test(value) ? value : null;
+}
+
 async function loadSharedRoute(token) {
-  if (!token) return;
+  const parsed = parseShareToken(token);
+  if (!parsed) {
+    setError('This share link is not valid. Ask the sender to share the route again.');
+    setStatus('Load a GPX or FIT file to begin.');
+    return;
+  }
   setError('');
   setStatus('Loading shared route …');
   showLoading(true);
   try {
-    const resp = await fetch(`/api/shared-routes/${encodeURIComponent(token)}`);
+    const resp = await fetch(`/api/shared-routes/${encodeURIComponent(parsed)}`);
     if (!resp.ok) {
+      const payload = await resp.json().catch(() => null);
       if (resp.status === 404) {
-        throw new Error('Shared route not found or link has expired.');
+        throw new Error(payload?.error || 'Shared route not found or link has expired.');
       }
-      throw new Error(`Failed to load shared route (HTTP ${resp.status})`);
+      throw new Error(payload?.error || `Failed to load shared route (HTTP ${resp.status})`);
     }
     const data = await resp.json();
     if (!data || !data.gpxText) {
@@ -1034,7 +1056,7 @@ async function loadSharedRoute(token) {
 
     currentRouteFilename = data.filename || 'shared-route.gpx';
     originalGpxText = data.gpxText;
-    currentShareToken = data.shareToken || token;
+    currentShareToken = data.shareToken || parsed;
     savedRouteForFile = true;
 
     // Parse GPX to GeoJSON

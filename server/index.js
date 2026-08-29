@@ -55,7 +55,7 @@ const {
   safeEqual,
   validateRoutePayload,
   validateTileCoordinates,
-  validateShareToken,
+  parseShareToken,
   isAllowedOrigin,
   positiveInteger,
   anonymizeIp,
@@ -117,7 +117,7 @@ app.use(helmet({
         'https://*.tile.opentopomap.org',
         'https://server.arcgisonline.com'
       ],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://unpkg.com', 'https://cdn.jsdelivr.net'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
       upgradeInsecureRequests: IS_PRODUCTION ? [] : null
@@ -304,8 +304,8 @@ app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res)
 // API: Retrieve shared route by token (public, rate-limited)
 app.get('/api/shared-routes/:token', proxyLimiter, async (req, res) => {
   try {
-    const token = req.params.token;
-    if (!validateShareToken(token)) {
+    const token = parseShareToken(req.params.token);
+    if (!token) {
       return res.status(400).json({ error: 'Invalid share token' });
     }
     const row = await getRouteByShareToken(token);

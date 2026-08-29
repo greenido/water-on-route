@@ -45,6 +45,9 @@ test('insertRoute automatically generates a valid shareToken', async () => {
   assert.ok(result.shareToken, 'Should return a shareToken');
   assert.equal(typeof result.shareToken, 'string');
   assert.equal(validateShareToken(result.shareToken), true, 'shareToken must satisfy validateShareToken');
+  // base64url uses _ which Slack/markdown split, turning ?route=ab_cd into ?route=ab
+  // (HTTP 400: too short). Hex never hits that class of chat-app URL breakers.
+  assert.match(result.shareToken, /^[0-9a-f]{32}$/);
 
   const row = await getRouteById(result.id);
   assert.equal(row.shareToken, result.shareToken, 'getRouteById must return the shareToken');
