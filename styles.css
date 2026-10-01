@@ -33,8 +33,46 @@ html, body { height: 100%; }
   place-content: center;
   gap: 12px;
   background: rgba(0,0,0,0.6);
-  z-index: 1000;
+  /* Leaflet's panes (400+) and controls (1000) share the root stacking
+     context, so anything lower is drawn underneath the map. Stays below the
+     help modal (2000) and toast (3000). */
+  z-index: 1500;
   text-align: center;
+}
+.loading-card {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  min-width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 20px 24px;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: #0f172a;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.progress-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1f2937;
+}
+.progress-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: inherit;
+  background: #38bdf8;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .progress-bar { animation-duration: 3s; }
 }
 .spinner {
   width: 36px;
