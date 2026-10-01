@@ -53,6 +53,9 @@ const errorEl = document.getElementById('error');
 const loadingEl = document.getElementById('loading');
 const loadingTextEl = document.getElementById('loadingText');
 const loadingElapsedEl = document.getElementById('loadingElapsed');
+const loadingQuoteEl = document.getElementById('loadingQuote');
+const loadingQuoteTextEl = document.getElementById('loadingQuoteText');
+const loadingQuoteByEl = document.getElementById('loadingQuoteBy');
 let busyCount = 0;
 let busyStartedAt = 0;
 let busyTimer = null;
@@ -281,12 +284,55 @@ function setStatus(msg) {
   if (busyCount > 0 && msg && loadingTextEl) loadingTextEl.textContent = msg;
 }
 
+// What the rider is waiting for, in their words rather than the API's.
+const MSG_WATER = 'Finding water along your route …';
+const MSG_REFILL = 'Looking for places to refill: shops, fuel stations, campsites …';
+const MSG_COFFEE = 'Looking for coffee stops along your route …';
+
 /**
  * Status callback for the adaptive Overpass fetches. They report how many
- * boxes have come back but never a total, since they split as they go.
+ * boxes have come back but never a total, since they split as they go. The
+ * first box is usually the whole route, so only a split is worth mentioning.
  */
 function overpassProgress(base) {
-  return (done) => setStatus(`${base} (${done} ${done === 1 ? 'area' : 'areas'} fetched)`);
+  return (done) => setStatus(done > 1 ? `${base} ${done} map sections checked` : base);
+}
+
+// Seconds after which the overlay explains the wait. Public Overpass
+// regularly takes a minute or more on a long route.
+const SLOW_AFTER_S = 20;
+
+// Shown one at a time while the overlay is up. Attributions are to sources
+// that are well documented; popular cycling quotes are often misattributed.
+const LOADING_QUOTES = [
+  { text: 'Life is like riding a bicycle. To keep your balance, you must keep moving.', by: 'Albert Einstein' },
+  { text: 'Get a bicycle. You will not regret it, if you live.', by: 'Mark Twain, “Taming the Bicycle”' },
+  { text: 'It never gets easier, you just go faster.', by: 'Greg LeMond' },
+  { text: 'Ride lots.', by: 'Eddy Merckx, asked how to get better' },
+  { text: 'Shut up, legs!', by: 'Jens Voigt' },
+  { text: 'I think it has done more to emancipate women than anything else in the world.', by: 'Susan B. Anthony, on the bicycle (1896)' },
+  { text: 'Thousands have lived without love, not one without water.', by: 'W. H. Auden' },
+  { text: 'Those who think they have no time for bodily exercise will sooner or later have to find time for illness.', by: 'Edward Stanley, Earl of Derby (1873)' },
+  { text: 'Drink before you are thirsty. By the time you feel it, you are already behind.', by: 'Ride tip' },
+  { text: 'Fill both bottles at the last tap before the longest dry stretch, even if they are half full.', by: 'Ride tip' },
+  { text: 'Fuel stations and corner shops almost always have water. Ask politely; most will fill a bottle.', by: 'Ride tip' },
+  { text: 'In the heat, plan on roughly one bottle an hour, more on long climbs.', by: 'Ride tip' },
+  { text: 'A café stop is not a break from training. It is part of it.', by: 'Ride tip' },
+  { text: 'Every water point on this map was added by an OpenStreetMap volunteer. Spotted a missing one? You can add it.', by: 'Did you know' },
+];
+const QUOTE_EVERY_S = 7;
+let quoteIndex = Math.floor(Math.random() * LOADING_QUOTES.length);
+
+function showNextQuote() {
+  if (!loadingQuoteEl) return;
+  quoteIndex = (quoteIndex + 1) % LOADING_QUOTES.length;
+  const { text, by } = LOADING_QUOTES[quoteIndex];
+  loadingQuoteEl.classList.remove('quote-in');
+  loadingQuoteTextEl.textContent = text;
+  loadingQuoteByEl.textContent = by;
+  // Reflow so re-adding the class restarts the fade.
+  void loadingQuoteEl.offsetWidth;
+  loadingQuoteEl.classList.add('quote-in');
 }
 function setError(msg) {
   if (!msg) { errorEl.hidden = true; errorEl.textContent = ''; return; }
@@ -332,9 +378,15 @@ function showLoading(show) {
     busyStartedAt = Date.now();
     if (loadingTextEl) loadingTextEl.textContent = statusEl.textContent || 'Working …';
     if (loadingElapsedEl) loadingElapsedEl.textContent = '';
+    showNextQuote();
     busyTimer = setInterval(() => {
       const secs = Math.round((Date.now() - busyStartedAt) / 1000);
-      if (loadingElapsedEl) loadingElapsedEl.textContent = `${secs} s`;
+      if (loadingElapsedEl) {
+        loadingElapsedEl.textContent = secs >= SLOW_AFTER_S
+          ? `${secs} s · OpenStreetMap's server is busy. Long routes can take a minute or two.`
+          : `${secs} s`;
+      }
+      if (secs > 0 && secs % QUOTE_EVERY_S === 0) showNextQuote();
     }, 1000);
   } else if (!busy && busyStartedAt) {
     busyStartedAt = 0;
@@ -1159,11 +1211,10 @@ async function loadSharedRoute(token) {
       ? data.bbox
       : computeBBoxFromGeoJSON(geojson);
 
-    const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
-    setStatus(`Querying ${backend} for water points …`);
+    setStatus(MSG_WATER);
     let results = [];
     try {
-      results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(`Querying ${backend} for water points …`), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(MSG_WATER), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     } catch (fetchErr) {
       console.warn('[loadSharedRoute] Live OSM query failed, falling back to saved points', fetchErr);
       if (Array.isArray(data.waterPoints) && data.waterPoints.length > 0) {
@@ -1208,9 +1259,8 @@ async function handleRouteFile(file) {
   const bbox = computeBBoxFromGeoJSON(geojson);
   showLoading(true);
   try {
-    const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
-    setStatus(`Querying ${backend} for water points …`);
-    const results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(`Querying ${backend} for water points …`), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+    setStatus(MSG_WATER);
+    const results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(MSG_WATER), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
     // Ride order, not proximity order: this is the sequence you meet them in.
     const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
@@ -1323,9 +1373,9 @@ if (navRefillBtn) {
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
       const routeFC = currentRouteAsFeatureCollection();
       const bbox = computeBBoxFromGeoJSON(routeFC);
-      setStatus('Querying Overpass for refill stops …');
+      setStatus(MSG_REFILL);
       showLoading(true);
-      const results = await fetchOSMRefillPointsAdaptive(bbox, overpassProgress('Querying Overpass for refill stops …'), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await fetchOSMRefillPointsAdaptive(bbox, overpassProgress(MSG_REFILL), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundRefillPoints = results || [];
       nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
       renderRefillMarkers(nearRefillPoints, true);
@@ -1349,9 +1399,9 @@ if (navCoffeeBtn) {
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
       const routeFC = currentRouteAsFeatureCollection();
       const bbox = computeBBoxFromGeoJSON(routeFC);
-      setStatus('Querying Overpass for coffee …');
+      setStatus(MSG_COFFEE);
       showLoading(true);
-      const results = await fetchOSMCoffeePointsAdaptive(bbox, overpassProgress('Querying Overpass for coffee …'), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await fetchOSMCoffeePointsAdaptive(bbox, overpassProgress(MSG_COFFEE), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundCoffeePoints = results || [];
       const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
       renderCoffeeMarkers(near, true);

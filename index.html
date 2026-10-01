@@ -8,7 +8,7 @@
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/tailwind.css?v=1">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?v=3">
+  <link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body class="bg-slate-950 text-slate-100 md:h-screen md:flex md:flex-col">
   <!-- Below ~640px the four labelled buttons plus the title do not fit on one
@@ -135,13 +135,19 @@
 
   <!-- Busy overlay for anything that waits on the network. Overpass gives no
        total up front (it splits boxes as it goes), so the bar is indeterminate
-       and the elapsed time shows it is still alive. -->
-  <div id="loading" class="loading" hidden role="status" aria-live="polite">
+       and the elapsed time shows it is still alive. Only the status line is a
+       live region: the rotating quotes would otherwise be read out every few
+       seconds. -->
+  <div id="loading" class="loading" hidden>
     <div class="loading-card">
       <div class="spinner"></div>
-      <div id="loadingText" class="text-slate-200 text-sm">Working …</div>
+      <div id="loadingText" class="text-slate-200 text-sm" role="status" aria-live="polite">Working …</div>
       <div class="progress-track"><div class="progress-bar"></div></div>
       <div id="loadingElapsed" class="text-slate-500 text-xs tabular-nums"></div>
+      <figure id="loadingQuote" class="loading-quote">
+        <blockquote id="loadingQuoteText"></blockquote>
+        <figcaption id="loadingQuoteBy"></figcaption>
+      </figure>
     </div>
   </div>
 
@@ -220,7 +226,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5.8.1/dist/togeojson.umd.js" integrity="sha384-4a+9x4ql6wch9epMfqnC3bSjASMJDDqpSuVblbNd6thkfnwdBucHgePPyl0exaFY" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/togpx@0.5.4/togpx.js" integrity="sha384-VKWiOLzj25saMnPgMUQG2n3n2YzT53ahfp5hrYIWvf996S+pKveAOXPW82Ttrgrg" crossorigin="anonymous"></script>
   <!-- Overpass-Frontend via ESM shim -->
-  <script type="module" src="app.js?v=7"></script>
+  <script type="module" src="app.js?v=8"></script>
 </body>
 </html>
 

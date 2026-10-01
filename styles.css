@@ -44,6 +44,8 @@ html, body { height: 100%; }
   gap: 10px;
   justify-items: center;
   min-width: 260px;
+  /* Wide enough for a quote to sit on two or three lines, not ten. */
+  width: 380px;
   max-width: calc(100vw - 32px);
   padding: 20px 24px;
   border: 1px solid #334155;
@@ -71,8 +73,37 @@ html, body { height: 100%; }
   from { transform: translateX(-100%); }
   to { transform: translateX(250%); }
 }
+.loading-quote {
+  margin: 6px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid #1e293b;
+  width: 100%;
+  /* Reserve room for a three-line quote so the card does not jump in height. */
+  min-height: 6.5em;
+}
+.loading-quote blockquote {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 14px;
+  font-style: italic;
+  line-height: 1.45;
+}
+.loading-quote blockquote::before { content: '“'; }
+.loading-quote blockquote::after { content: '”'; }
+.loading-quote figcaption {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+}
+.loading-quote figcaption::before { content: '— '; }
+.quote-in { animation: quoteIn 500ms ease both; }
+@keyframes quoteIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
 @media (prefers-reduced-motion: reduce) {
   .spinner, .progress-bar { animation-duration: 3s; }
+  .quote-in { animation: none; }
 }
 .spinner {
   width: 36px;
