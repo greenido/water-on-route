@@ -8,7 +8,7 @@
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/tailwind.css?v=1">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?v=2">
+  <link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body class="bg-slate-950 text-slate-100 md:h-screen md:flex md:flex-col">
   <!-- Below ~640px the four labelled buttons plus the title do not fit on one
@@ -55,6 +55,16 @@
           <option value="1000">1000 m</option>
           <option value="2000">2000 m</option>
         </select>
+      </div>
+
+      <!-- Many exported routes (RideWithGPS, Komoot cues) carry a waypoint for
+           every turn. Drawn as pins they bury the water and coffee icons, so
+           they get their own switch. Shown only when the route has any. -->
+      <div id="routeWaypointsControl" hidden>
+        <label for="routeWaypointsToggle" class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" id="routeWaypointsToggle" class="mt-0.5 accent-sky-400" checked>
+          <span class="text-sm text-slate-300">Show route waypoints <span id="routeWaypointsCount" class="text-slate-500"></span></span>
+        </label>
       </div>
 
       <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-2">
@@ -123,6 +133,18 @@
     </section>
   </main>
 
+  <!-- Busy overlay for anything that waits on the network. Overpass gives no
+       total up front (it splits boxes as it goes), so the bar is indeterminate
+       and the elapsed time shows it is still alive. -->
+  <div id="loading" class="loading" hidden role="status" aria-live="polite">
+    <div class="loading-card">
+      <div class="spinner"></div>
+      <div id="loadingText" class="text-slate-200 text-sm">Working …</div>
+      <div class="progress-track"><div class="progress-bar"></div></div>
+      <div id="loadingElapsed" class="text-slate-500 text-xs tabular-nums"></div>
+    </div>
+  </div>
+
   <!-- Help modal -->
   <div id="helpModal" class="fixed inset-0 z-[2000] hidden" aria-hidden="true" role="dialog" aria-modal="true">
     <div id="helpOverlay" class="absolute inset-0 bg-black/60 opacity-0 transition-opacity duration-200"></div>
@@ -141,6 +163,7 @@
           <li>The list and the strip under the map show the stops in the order you will ride past them, with the shaded band marking the dry stretch.</li>
           <li>Click "Download enriched GPX" to save your original route with water waypoints added. Each waypoint is named with its position, like "km 47.0 — Fountain", so it is readable on a head unit.</li>
           <li>Use "Clean map" anytime to clear the map and start over.</li>
+          <li>If your route file has its own waypoints (turn cues, for example), untick "Show route waypoints" to hide them so the water and coffee icons are easy to see.</li>
           <li>
             Click "Refill stops" for places to top up that are not tagged as drinking water —
             fuel stations, shops, campgrounds, public toilets and cemetery taps. Outside towns
@@ -166,6 +189,7 @@
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">S</kbd><span>Share route link</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">F</kbd><span>Find ⛽ refill stops</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">C</kbd><span>Press C (no modifiers) to trigger ☕ Search coffee</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">W</kbd><span>Show / hide route waypoints</span></li>
           </ul>
         </div>
 
@@ -196,7 +220,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5.8.1/dist/togeojson.umd.js" integrity="sha384-4a+9x4ql6wch9epMfqnC3bSjASMJDDqpSuVblbNd6thkfnwdBucHgePPyl0exaFY" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/togpx@0.5.4/togpx.js" integrity="sha384-VKWiOLzj25saMnPgMUQG2n3n2YzT53ahfp5hrYIWvf996S+pKveAOXPW82Ttrgrg" crossorigin="anonymous"></script>
   <!-- Overpass-Frontend via ESM shim -->
-  <script type="module" src="app.js?v=6"></script>
+  <script type="module" src="app.js?v=7"></script>
 </body>
 </html>
 

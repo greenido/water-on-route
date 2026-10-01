@@ -19,7 +19,7 @@
  * UX features:
  *   - Drag & drop or file picker for GPX / FIT
  *   - Base layer switcher and animated water markers
- *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download, 'F' refill, 'C' coffee
+ *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download, 'F' refill, 'C' coffee, 'W' waypoints
  */
 
 import {
@@ -50,7 +50,12 @@ const fileInput = document.getElementById('gpxFile');
 const dropZone = document.getElementById('dropZone');
 const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
-let loadingEl = document.getElementById('loading');
+const loadingEl = document.getElementById('loading');
+const loadingTextEl = document.getElementById('loadingText');
+const loadingElapsedEl = document.getElementById('loadingElapsed');
+let busyCount = 0;
+let busyStartedAt = 0;
+let busyTimer = null;
 const downloadBtn = document.getElementById('downloadBtn');
 const shareBtn = document.getElementById('shareBtn');
 const radiusSelect = document.getElementById('radiusSelect');
@@ -85,6 +90,18 @@ if (saveRouteToggle) {
     try { localStorage.setItem(SAVE_ROUTE_PREF_KEY, String(saveRouteEnabled)); } catch (_) {}
     showToast(saveRouteEnabled ? 'Routes will be saved on the server.' : 'Routes stay in your browser.');
   });
+}
+// Waypoints that came inside the route file (turn cues and the like). Remembered
+// per device, like the save preference; shown by default.
+const routeWaypointsControl = document.getElementById('routeWaypointsControl');
+const routeWaypointsToggle = document.getElementById('routeWaypointsToggle');
+const routeWaypointsCount = document.getElementById('routeWaypointsCount');
+const SHOW_WAYPOINTS_PREF_KEY = 'wor.showRouteWaypoints';
+let showRouteWaypoints = true;
+try { showRouteWaypoints = localStorage.getItem(SHOW_WAYPOINTS_PREF_KEY) !== 'false'; } catch (_) {}
+if (routeWaypointsToggle) {
+  routeWaypointsToggle.checked = showRouteWaypoints;
+  routeWaypointsToggle.addEventListener('change', () => setRouteWaypointsVisible(routeWaypointsToggle.checked));
 }
 // Top nav + help modal elements
 const navNewBtn = document.getElementById('navNewBtn');
@@ -182,6 +199,11 @@ attachTileRetryHandlers(localTiles);
 // Keep reference to current base layer when user switches
 map.on('baselayerchange', (e) => { tileLayer = e.layer; });
 
+// The layers control can hide route waypoints too; keep the sidebar box honest.
+map.on('overlayadd overlayremove', (e) => {
+  if (e.layer === routeWaypointLayer) setRouteWaypointsVisible(e.type === 'overlayadd');
+});
+
 // Force a redraw after zoom completes to ensure any missed tiles are requested
 map.on('zoomend', () => {
   try { tileLayer.redraw(); } catch (_) {}
@@ -212,7 +234,11 @@ function centerMapOnUser() {
 centerMapOnUser();
 
 let routeLayer = null;
+let routeWaypointLayer = null;
 let currentRouteGeoJSON = null;
+// Leaflet stacks markers by latitude, so a route pin just south of a fountain
+// covers it. Lift everything we found above the file's own waypoints.
+const POI_Z_OFFSET = 1000;
 let waterLayer = L.layerGroup().addTo(map);
 const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
 let refillLayer = L.layerGroup().addTo(map);
@@ -249,7 +275,19 @@ let currentRouteKm = 0;
 layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Refill Stops': refillLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
 
 // Helpers
-function setStatus(msg) { statusEl.textContent = msg || ''; }
+function setStatus(msg) {
+  statusEl.textContent = msg || '';
+  // While busy, the overlay hides the sidebar, so it carries the same message.
+  if (busyCount > 0 && msg && loadingTextEl) loadingTextEl.textContent = msg;
+}
+
+/**
+ * Status callback for the adaptive Overpass fetches. They report how many
+ * boxes have come back but never a total, since they split as they go.
+ */
+function overpassProgress(base) {
+  return (done) => setStatus(`${base} (${done} ${done === 1 ? 'area' : 'areas'} fetched)`);
+}
 function setError(msg) {
   if (!msg) { errorEl.hidden = true; errorEl.textContent = ''; return; }
   errorEl.hidden = false; errorEl.textContent = msg;
@@ -281,25 +319,29 @@ function showToast(message, durationMs = 2000) {
     }, Number.isFinite(durationMs) ? durationMs : 2000);
   } catch (_) {}
 }
-function ensureLoadingEl() {
-  if (!loadingEl) {
-    const div = document.createElement('div');
-    div.id = 'loading';
-    div.className = 'fixed inset-0 place-content-center gap-3 bg-black/60 z-50 text-center';
-    div.innerHTML = '<div class="spinner"></div><div class="text-slate-200">Fetching water points…</div>';
-    div.hidden = true;
-    document.body.appendChild(div);
-    loadingEl = div;
-  }
-  return loadingEl;
-}
-
+/**
+ * Busy overlay. Counted rather than a flag: a keyboard shortcut can start a
+ * coffee search while the water query is still running, and the first one to
+ * finish must not hide the overlay for the other.
+ */
 function showLoading(show) {
-  if (show && !loadingEl) ensureLoadingEl();
   if (!loadingEl) return;
-  loadingEl.hidden = !show;
-  loadingEl.classList.toggle('show', !!show);
-  loadingEl.style.display = show ? 'grid' : 'none';
+  busyCount = Math.max(0, busyCount + (show ? 1 : -1));
+  const busy = busyCount > 0;
+  if (busy && !busyStartedAt) {
+    busyStartedAt = Date.now();
+    if (loadingTextEl) loadingTextEl.textContent = statusEl.textContent || 'Working …';
+    if (loadingElapsedEl) loadingElapsedEl.textContent = '';
+    busyTimer = setInterval(() => {
+      const secs = Math.round((Date.now() - busyStartedAt) / 1000);
+      if (loadingElapsedEl) loadingElapsedEl.textContent = `${secs} s`;
+    }, 1000);
+  } else if (!busy && busyStartedAt) {
+    busyStartedAt = 0;
+    clearInterval(busyTimer);
+  }
+  loadingEl.hidden = !busy;
+  loadingEl.classList.toggle('show', busy);
 }
 
 function fitMapToGeoJSON(geojson) {
@@ -317,15 +359,48 @@ function fitMapToGeoJSON(geojson) {
   if (bounds.length) map.fitBounds(bounds);
 }
 
+/** Drop a route-owned layer from both the map and the layers control. */
+function removeRouteOverlay(layer) {
+  if (!layer) return;
+  // Control first: once it lets go, removing from the map fires no overlayremove.
+  try { if (layersControl) layersControl.removeLayer(layer); } catch (_) {}
+  map.removeLayer(layer);
+}
+
+function setRouteWaypointsVisible(visible) {
+  showRouteWaypoints = !!visible;
+  try { localStorage.setItem(SHOW_WAYPOINTS_PREF_KEY, String(showRouteWaypoints)); } catch (_) {}
+  if (routeWaypointsToggle) routeWaypointsToggle.checked = showRouteWaypoints;
+  if (!routeWaypointLayer) return;
+  if (showRouteWaypoints && !map.hasLayer(routeWaypointLayer)) routeWaypointLayer.addTo(map);
+  if (!showRouteWaypoints && map.hasLayer(routeWaypointLayer)) map.removeLayer(routeWaypointLayer);
+}
+
 function renderRoute(geojson) {
-  if (routeLayer) {
-    try { if (layersControl) layersControl.removeLayer(routeLayer); } catch (_) {}
-    map.removeLayer(routeLayer);
-    routeLayer = null;
-  }
-  routeLayer = L.geoJSON(geojson, { style: { color: '#3aa7ff', weight: 4 } });
+  removeRouteOverlay(routeLayer);
+  removeRouteOverlay(routeWaypointLayer);
+  routeLayer = null;
+  routeWaypointLayer = null;
+
+  // The line and the file's own waypoints are separate layers so the
+  // waypoints can be hidden without losing the route.
+  const features = geojson.type === 'FeatureCollection' ? geojson.features : [geojson];
+  const isPoint = (f) => /Point$/.test(f?.geometry?.type || '');
+  const lines = features.filter((f) => !isPoint(f));
+  const points = features.filter(isPoint);
+
+  routeLayer = L.geoJSON({ type: 'FeatureCollection', features: lines }, { style: { color: '#3aa7ff', weight: 4 } });
   routeLayer.addTo(map);
   try { if (layersControl) layersControl.addOverlay(routeLayer, 'Route'); } catch (_) {}
+
+  if (points.length) {
+    routeWaypointLayer = L.geoJSON({ type: 'FeatureCollection', features: points });
+    if (showRouteWaypoints) routeWaypointLayer.addTo(map);
+    try { if (layersControl) layersControl.addOverlay(routeWaypointLayer, 'Route waypoints'); } catch (_) {}
+  }
+  if (routeWaypointsCount) routeWaypointsCount.textContent = `(${points.length})`;
+  if (routeWaypointsControl) routeWaypointsControl.hidden = points.length === 0;
+
   fitMapToGeoJSON(geojson);
 }
 
@@ -357,9 +432,10 @@ function currentRouteAsFeatureCollection() {
     ? routeLayer.toGeoJSON()
     : currentRouteGeoJSON;
   if (!routeGeo) return { type: 'FeatureCollection', features: [] };
-  return routeGeo.type === 'FeatureCollection'
-    ? routeGeo
-    : { type: 'FeatureCollection', features: [routeGeo] };
+  const features = routeGeo.type === 'FeatureCollection' ? routeGeo.features : [routeGeo];
+  // Hiding the file's waypoints is a view choice; the export still carries them.
+  const waypoints = routeWaypointLayer ? routeWaypointLayer.toGeoJSON().features : [];
+  return { type: 'FeatureCollection', features: [...features, ...waypoints] };
 }
 
 /**
@@ -535,7 +611,7 @@ function renderWaterMarkers(points, animate = false) {
     mapsLink.rel = 'noopener';
     mapsLink.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
     popup.appendChild(mapsLink);
-    const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon() })
+    const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon(), zIndexOffset: POI_Z_OFFSET })
       .bindPopup(popup)
       .addTo(waterLayer);
     if (animate) {
@@ -640,7 +716,14 @@ async function shareRoute() {
     }
     setError('');
     setStatus('Preparing share link …');
-    const token = await ensureRouteSaved();
+    // Only the save waits on the server; the share sheet must not sit under the overlay.
+    let token;
+    showLoading(true);
+    try {
+      token = await ensureRouteSaved();
+    } finally {
+      showLoading(false);
+    }
     if (!token) {
       setError('Could not generate share link.');
       setStatus('');
@@ -731,7 +814,7 @@ function renderRefillMarkers(points, animate = false) {
     mapsLink.textContent = 'Open in Google Maps';
     popup.appendChild(mapsLink);
 
-    const marker = L.marker([lat, lon], { title: `${tags.name || kind} — ${refillExpectation(tags)}`, icon: refillIcon(confidence) })
+    const marker = L.marker([lat, lon], { title: `${tags.name || kind} — ${refillExpectation(tags)}`, icon: refillIcon(confidence), zIndexOffset: POI_Z_OFFSET })
       .bindPopup(popup)
       .addTo(refillLayer);
     if (animate) {
@@ -826,7 +909,7 @@ async function renderCoffeeMarkers(points, animate = false) {
     mapsLink.textContent = 'Open in Google Maps';
     popup.appendChild(mapsLink);
 
-    const marker = L.marker([lat, lon], { title: name, icon: baseCoffeeIcon() })
+    const marker = L.marker([lat, lon], { title: name, icon: baseCoffeeIcon(), zIndexOffset: POI_Z_OFFSET })
       .bindPopup(popup)
       .addTo(coffeeLayer);
     if (animate) {
@@ -848,11 +931,11 @@ function resetApp() {
   try {
     setError('');
     // Remove layers
-    if (routeLayer) {
-      try { if (layersControl) layersControl.removeLayer(routeLayer); } catch (_) {}
-      map.removeLayer(routeLayer);
-      routeLayer = null;
-    }
+    removeRouteOverlay(routeLayer);
+    removeRouteOverlay(routeWaypointLayer);
+    routeLayer = null;
+    routeWaypointLayer = null;
+    if (routeWaypointsControl) routeWaypointsControl.hidden = true;
     if (waterLayer) { waterLayer.clearLayers(); }
     if (refillLayer) { refillLayer.clearLayers(); }
     if (coffeeLayer) { coffeeLayer.clearLayers(); }
@@ -1080,9 +1163,7 @@ async function loadSharedRoute(token) {
     setStatus(`Querying ${backend} for water points …`);
     let results = [];
     try {
-      results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
-        setStatus(`Querying ${backend} for water points … (${done})`);
-      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(`Querying ${backend} for water points …`), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     } catch (fetchErr) {
       console.warn('[loadSharedRoute] Live OSM query failed, falling back to saved points', fetchErr);
       if (Array.isArray(data.waterPoints) && data.waterPoints.length > 0) {
@@ -1129,9 +1210,7 @@ async function handleRouteFile(file) {
   try {
     const backend = (window.WOR_CONFIG && window.WOR_CONFIG.overpassUrl) ? 'planet (Overpass)' : 'OpenStreetMap';
     setStatus(`Querying ${backend} for water points …`);
-    const results = await fetchOSMWaterPointsAdaptive(bbox, (done) => {
-      setStatus(`Querying ${backend} for water points … (${done})`);
-    }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+    const results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(`Querying ${backend} for water points …`), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
     foundWaterPoints = results;
     // Ride order, not proximity order: this is the sequence you meet them in.
     const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
@@ -1246,9 +1325,7 @@ if (navRefillBtn) {
       const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus('Querying Overpass for refill stops …');
       showLoading(true);
-      const results = await fetchOSMRefillPointsAdaptive(bbox, (done) => {
-        setStatus(`Querying Overpass for refill stops … (${done})`);
-      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await fetchOSMRefillPointsAdaptive(bbox, overpassProgress('Querying Overpass for refill stops …'), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundRefillPoints = results || [];
       nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
       renderRefillMarkers(nearRefillPoints, true);
@@ -1274,9 +1351,7 @@ if (navCoffeeBtn) {
       const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus('Querying Overpass for coffee …');
       showLoading(true);
-      const results = await fetchOSMCoffeePointsAdaptive(bbox, (done) => {
-        setStatus(`Querying Overpass for coffee … (${done})`);
-      }, { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await fetchOSMCoffeePointsAdaptive(bbox, overpassProgress('Querying Overpass for coffee …'), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
       foundCoffeePoints = results || [];
       const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
       renderCoffeeMarkers(near, true);
@@ -1361,6 +1436,15 @@ document.addEventListener('keydown', (e) => {
     if (navCoffeeBtn) {
       e.preventDefault();
       navCoffeeBtn.click();
+      return;
+    }
+  }
+
+  // 'W' shows / hides the route file's own waypoints
+  if (!isTyping && (e.key === 'W' || e.key === 'w')) {
+    if (routeWaypointLayer) {
+      e.preventDefault();
+      setRouteWaypointsVisible(!showRouteWaypoints);
       return;
     }
   }
