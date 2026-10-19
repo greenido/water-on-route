@@ -1495,12 +1495,8 @@ function locateRider() {
 // is too small to gain anything from splitting, so wait a moment and ask once more.
 const OVERPASS_BUSY = new Set([429, 502, 503, 504]);
 const MSG_OVERPASS_BUSY = "OpenStreetMap's server is busy right now. Try again in a minute.";
-// The public endpoint queues requests, and 30 s answers are normal when it is
-// busy. Wait a little longer than the proxy's own 60 s upstream timeout, so the
-// proxy's 504 (and the answer it caches for next time) arrives before we give up.
-const NEARBY_TIMEOUT_MS = 65000;
 async function fetchNearbyOnce(bbox, onProgress) {
-  const options = { minSpan: 1, initialBackoffMs: 0, timeoutMs: NEARBY_TIMEOUT_MS };
+  const options = { minSpan: 1, initialBackoffMs: 0 };
   try {
     return await fetchOSMNearbyPoints(bbox, onProgress, options);
   } catch (err) {

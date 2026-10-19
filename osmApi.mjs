@@ -108,6 +108,14 @@ export function isCoffeeTags(tags) {
 }
 
 /**
+ * How long the browser waits for one proxy answer. A little longer than the
+ * proxy's own budget (OVERPASS_TIMEOUT_MS, 60 s by default, fallback mirrors
+ * included), so its answer, or its 504, arrives before we give up, and a slow
+ * public endpoint still ends in a result rather than an abort.
+ */
+export const OVERPASS_CLIENT_TIMEOUT_MS = 65000;
+
+/**
  * Ask the proxy for one bbox worth of POIs.
  *
  * Only the box and the kind travel over the wire; the Overpass QL is built
@@ -117,7 +125,7 @@ export function isCoffeeTags(tags) {
  * @param {'water'|'coffee'} kind
  * @returns {Promise<string>} Overpass XML
  */
-export async function fetchOverpassXml(bbox, kind = 'water', timeoutMs = 30000, fetchImpl) {
+export async function fetchOverpassXml(bbox, kind = 'water', timeoutMs = OVERPASS_CLIENT_TIMEOUT_MS, fetchImpl) {
   const resp = await fetchWithTimeout(
     getOverpassUrl(),
     {
@@ -295,7 +303,7 @@ function getStatusFromError(err) {
  */
 export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}) {
   const minSpan = options.minSpan ?? 0.02;
-  const timeoutMs = options.timeoutMs ?? 30000;
+  const timeoutMs = options.timeoutMs ?? OVERPASS_CLIENT_TIMEOUT_MS;
   const initialBackoffMs = options.initialBackoffMs ?? 500;
   const maxBackoffMs = options.maxBackoffMs ?? 4000;
   const fetchImpl = options.fetchImpl; // optional for tests

@@ -101,7 +101,8 @@ Notes:
 
 - Backend (`server/index.js`)
   - Serves static frontend files
-  - Proxies POST `/api/overpass` to the configured Overpass endpoint
+  - Proxies POST `/api/overpass` to the configured Overpass endpoint, falling back to a
+    mirror when it is busy (see `server/overpassUpstream.js`)
   - Proxies GET `/tiles/{z}/{x}/{y}.png` to the configured tile source
   - Adds timeouts and simple headers; avoids browser CORS issues
 
@@ -165,6 +166,17 @@ npm start
 If you leave variables unset, sane defaults will be used:
 
 - `OVERPASS_URL`: `https://overpass-api.de/api/interpreter`
+- `OVERPASS_FALLBACK_URLS`: comma-separated mirrors asked in turn when the primary answers
+  429/502/503/504, fails, or is still queued after `OVERPASS_ATTEMPT_TIMEOUT_MS`. Unset means
+  `https://maps.mail.ru/osm/tools/overpass/api/interpreter`; set it to an empty string to turn
+  fallbacks off (for example with a local Overpass). Other answers, such as a 400, are final
+- `OVERPASS_TIMEOUT_MS`: total time for one Overpass request, fallbacks included (default
+  `60000`). The browser waits 65 s, so keep this below that
+- `OVERPASS_ATTEMPT_TIMEOUT_MS`: how long any upstream but the last may take before the next is
+  asked (default `25000`)
+- `OVERPASS_USER_AGENT`: sent to every Overpass upstream (default
+  `water-on-route/1.0 (+https://github.com/greenido/water-on-route)`). overpass-api.de answers
+  generic agents such as `node` or `curl` with `406 Not Acceptable`
 - `TILE_URL_TEMPLATE`: `https://tile.openstreetmap.org/{z}/{x}/{y}.png`
 - `PORT`: `3000`
 - `ROUTES_DB_PATH`: path to SQLite file (default `/data/routes.sqlite3` if available)
@@ -318,8 +330,9 @@ Ensure your service listens on port 3000 (already configured) and the volume mou
   - The first import is slow. Check container logs and wait until the API responds at `http://localhost:12345/api/interpreter`.
 
 - 429/504 or partial results from Overpass
-  - The frontend uses adaptive splitting and exponential backoff. Try reducing the route size, waiting longer, or running a local Overpass instance.
-  - Increase `OVERPASS_TIMEOUT_MS` on the proxy if needed.
+  - The proxy falls back to `OVERPASS_FALLBACK_URLS` when the primary is busy, and logs
+    `[overpass] … trying …` when it does. The frontend uses adaptive splitting and exponential backoff. Try reducing the route size, waiting longer, or running a local Overpass instance.
+  - Increase `OVERPASS_TIMEOUT_MS` on the proxy if needed, up to about 60 s: the browser stops waiting at 65 s.
 
 - Tiles are slow or rate-limited
   - Prefer the local tile server in Docker. If using public tiles, respect their usage policies and set a clear `TILE_USER_AGENT`.
