@@ -14,7 +14,10 @@
  * Environment variables:
  *   PORT                    → listening port (default 3000)
  *   OVERPASS_URL            → Overpass API base URL
- *   OVERPASS_TIMEOUT_MS     → timeout for Overpass requests
+ *   OVERPASS_FALLBACK_URLS  → comma-separated mirrors tried when it is busy ("" for none)
+ *   OVERPASS_TIMEOUT_MS     → total time budget for one Overpass request, fallbacks included
+ *   OVERPASS_ATTEMPT_TIMEOUT_MS → cap per upstream before moving on to the next
+ *   OVERPASS_USER_AGENT     → UA string for Overpass requests
  *   TILE_URL_TEMPLATE       → tile URL template, e.g. https://tile.openstreetmap.org/{z}/{x}/{y}.png
  *   TILE_TIMEOUT_MS         → timeout for tile fetches
  *   TILE_USER_AGENT         → UA string for tile requests
@@ -63,6 +66,7 @@ const {
 } = require('./security');
 const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
 const { OverpassCache, cacheKey } = require('./overpassCache');
+const { DEFAULT_USER_AGENT, parseFallbackUrls, queryUpstreams } = require('./overpassUpstream');
 const { enrichedGpxForRow } = require('./enrichedGpx');
 
 const app = express();
@@ -73,6 +77,14 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter';
 const TILE_URL_TEMPLATE = process.env.TILE_URL_TEMPLATE || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const OVERPASS_TIMEOUT_MS = positiveInteger(process.env.OVERPASS_TIMEOUT_MS, 60000, 1000, 120000);
+// A primary stuck in its queue gives up after this, leaving the rest of
+// OVERPASS_TIMEOUT_MS to a fallback (see server/overpassUpstream.js).
+const OVERPASS_ATTEMPT_TIMEOUT_MS = positiveInteger(process.env.OVERPASS_ATTEMPT_TIMEOUT_MS, 25000, 1000, 120000);
+const OVERPASS_UPSTREAMS = [
+  OVERPASS_URL,
+  ...parseFallbackUrls(process.env.OVERPASS_FALLBACK_URLS).filter((url) => url !== OVERPASS_URL)
+];
+const OVERPASS_USER_AGENT = process.env.OVERPASS_USER_AGENT || DEFAULT_USER_AGENT;
 const TILE_TIMEOUT_MS = positiveInteger(process.env.TILE_TIMEOUT_MS, 20000, 1000, 60000);
 const OVERPASS_MAX_RESPONSE_BYTES = positiveInteger(
   process.env.OVERPASS_MAX_RESPONSE_BYTES,
@@ -753,27 +765,24 @@ app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res
   }
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), OVERPASS_TIMEOUT_MS);
-    try {
-      const body = 'data=' + encodeURIComponent(buildQueryForKind(kind, validation.value));
-      const headers = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
-      const upstreamResp = await fetch(OVERPASS_URL, { method: 'POST', headers, body, signal: controller.signal });
-      const responseBody = await readUpstreamBody(
-        upstreamResp,
-        OVERPASS_MAX_RESPONSE_BYTES
-      );
-      const ct = upstreamResp.headers.get('content-type') || 'text/xml; charset=utf-8';
-      // Only successful bodies are worth keeping; an error page cached for six
-      // hours would be far worse than re-asking.
-      if (upstreamResp.ok) overpassCache.set(key, responseBody, ct);
-      res.status(upstreamResp.status);
-      res.setHeader('Content-Type', ct);
-      res.setHeader('X-Cache', 'MISS');
-      return res.send(responseBody);
-    } finally {
-      clearTimeout(timer);
-    }
+    const upstream = await queryUpstreams({
+      urls: OVERPASS_UPSTREAMS,
+      body: 'data=' + encodeURIComponent(buildQueryForKind(kind, validation.value)),
+      userAgent: OVERPASS_USER_AGENT,
+      attemptTimeoutMs: OVERPASS_ATTEMPT_TIMEOUT_MS,
+      totalTimeoutMs: OVERPASS_TIMEOUT_MS,
+      fetchImpl: fetch,
+      readBody: (response) => readUpstreamBody(response, OVERPASS_MAX_RESPONSE_BYTES),
+      log: (message) => console.warn(message)
+    });
+    const ct = upstream.contentType || 'text/xml; charset=utf-8';
+    // Only successful bodies are worth keeping; an error page cached for six
+    // hours would be far worse than re-asking.
+    if (upstream.ok) overpassCache.set(key, upstream.body, ct);
+    res.status(upstream.status);
+    res.setHeader('Content-Type', ct);
+    res.setHeader('X-Cache', 'MISS');
+    return res.send(upstream.body);
   } catch (err) {
     const status = err.name === 'AbortError' ? 504 : 502;
     console.error('[POST /api/overpass] error', err);
@@ -850,7 +859,7 @@ initDatabase()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`🍎 Local proxy listening on http://localhost:${PORT}`);
-      console.log(`🍯 Overpass upstream: ${OVERPASS_URL}`);
+      console.log(`🍯 Overpass upstream: ${OVERPASS_UPSTREAMS.join(' → ')}`);
       console.log(`🍯 Tile upstream: ${TILE_URL_TEMPLATE}`);
       console.log(`㏈ - Database initialized at ${DB_PATH}`);
     });

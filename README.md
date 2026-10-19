@@ -8,6 +8,12 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 
 ## Features
 
+- **Find water near me** (built for phones): one tap, no route needed. The app asks for
+  your location and lists the closest drinking water, cafés, convenience stores and fuel
+  stations, nearest first, with distance, direction, hours and a "Go" button that opens
+  directions (Apple Maps on iPhone, Google Maps elsewhere). It searches 1.5 km around you,
+  widens to 5 km when there is little nearby, and "Search wider" goes to 15 km. Open
+  `/?near` (or add it to your home screen) to start straight into a search
 - Upload or drag-and-drop a `.gpx` or Garmin `.fit` file
 - Interactive map with your route, water markers, and optional coffee markers
 - Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
@@ -88,10 +94,15 @@ Notes:
   - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
   - Split quads are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
+  - Near me: takes one position fix, sends a box around it (padded out to a ~500 m grid so
+    riders close together share the server cache), and asks for the `nearby` kind, which is
+    water, coffee, convenience stores and fuel in a single Overpass query. Results are trimmed
+    back to the circle and sorted by distance. Private taps (`access=private|no`) are dropped
 
 - Backend (`server/index.js`)
   - Serves static frontend files
-  - Proxies POST `/api/overpass` to the configured Overpass endpoint
+  - Proxies POST `/api/overpass` to the configured Overpass endpoint, falling back to a
+    mirror when it is busy (see `server/overpassUpstream.js`)
   - Proxies GET `/tiles/{z}/{x}/{y}.png` to the configured tile source
   - Adds timeouts and simple headers; avoids browser CORS issues
 
@@ -155,6 +166,17 @@ npm start
 If you leave variables unset, sane defaults will be used:
 
 - `OVERPASS_URL`: `https://overpass-api.de/api/interpreter`
+- `OVERPASS_FALLBACK_URLS`: comma-separated mirrors asked in turn when the primary answers
+  429/502/503/504, fails, or is still queued after `OVERPASS_ATTEMPT_TIMEOUT_MS`. Unset means
+  `https://maps.mail.ru/osm/tools/overpass/api/interpreter`; set it to an empty string to turn
+  fallbacks off (for example with a local Overpass). Other answers, such as a 400, are final
+- `OVERPASS_TIMEOUT_MS`: total time for one Overpass request, fallbacks included (default
+  `60000`). The browser waits 65 s, so keep this below that
+- `OVERPASS_ATTEMPT_TIMEOUT_MS`: how long any upstream but the last may take before the next is
+  asked (default `25000`)
+- `OVERPASS_USER_AGENT`: sent to every Overpass upstream (default
+  `water-on-route/1.0 (+https://github.com/greenido/water-on-route)`). overpass-api.de answers
+  generic agents such as `node` or `curl` with `406 Not Acceptable`
 - `TILE_URL_TEMPLATE`: `https://tile.openstreetmap.org/{z}/{x}/{y}.png`
 - `PORT`: `3000`
 - `ROUTES_DB_PATH`: path to SQLite file (default `/data/routes.sqlite3` if available)
@@ -211,7 +233,7 @@ The Express server exposes a few endpoints:
 - `GET /app.js`, `GET /styles.css`, `GET /osmApi.mjs`, `GET /test.html` – static assets
 - `GET /health` – simple health check
 - `POST /api/overpass` – Overpass proxy
-  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" | "refill" }`
+  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" | "refill" | "nearby" }`
   - The Overpass QL is built server-side from these two inputs; client-supplied
     query text is never forwarded, so the endpoint cannot be used as an open relay
   - Same-origin requests only; a bbox spanning more than 12° on a side is rejected
@@ -255,6 +277,9 @@ The Express server exposes a few endpoints:
 - Saving a route is disclosed in the sidebar and can be switched off; the choice
   is remembered per device. With it off, nothing but anonymous OpenStreetMap
   queries leaves the browser, and the map and enriched download still work.
+- "Find water near me" uses your location only in the browser. The server sees a box a few
+  kilometres across, rounded to a ~500 m grid, and keeps OpenStreetMap's answer for that box
+  in its in-memory cache. The box is never written to the database or tied to a route.
 - Stored addresses are reduced to a coarse network before they are written:
   IPv4 keeps the `/24`, IPv6 keeps the `/48`. Full addresses are never persisted.
 - The city lookup that sends addresses to `ipapi.co` is opt-in via
@@ -305,8 +330,9 @@ Ensure your service listens on port 3000 (already configured) and the volume mou
   - The first import is slow. Check container logs and wait until the API responds at `http://localhost:12345/api/interpreter`.
 
 - 429/504 or partial results from Overpass
-  - The frontend uses adaptive splitting and exponential backoff. Try reducing the route size, waiting longer, or running a local Overpass instance.
-  - Increase `OVERPASS_TIMEOUT_MS` on the proxy if needed.
+  - The proxy falls back to `OVERPASS_FALLBACK_URLS` when the primary is busy, and logs
+    `[overpass] … trying …` when it does. The frontend uses adaptive splitting and exponential backoff. Try reducing the route size, waiting longer, or running a local Overpass instance.
+  - Increase `OVERPASS_TIMEOUT_MS` on the proxy if needed, up to about 60 s: the browser stops waiting at 65 s.
 
 - Tiles are slow or rate-limited
   - Prefer the local tile server in Docker. If using public tiles, respect their usage policies and set a clear `TILE_USER_AGENT`.

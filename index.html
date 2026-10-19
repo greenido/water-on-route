@@ -6,9 +6,9 @@
   <title>GPX Water Mapper</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="alternate icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/tailwind.css?v=1">
+  <link rel="stylesheet" href="/tailwind.css?v=2">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
-  <link rel="stylesheet" href="styles.css?v=4">
+  <link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body class="bg-slate-950 text-slate-100 md:h-screen md:flex md:flex-col">
   <!-- Below ~640px the four labelled buttons plus the title do not fit on one
@@ -32,8 +32,41 @@
        own, so the elevation strip under the map is always visible. On narrow
        screens the columns stack and the page scrolls normally. Height comes from
        the flex column on body rather than a hardcoded header offset. -->
-  <main class="grid md:grid-cols-[360px_1fr] md:flex-1 md:min-h-0">
+  <!-- grid-cols-1 is minmax(0, 1fr): without it the stacked column grows to fit
+       its widest unbreakable line (a long opening_hours string, say) and the page
+       scrolls sideways on a phone. -->
+  <main class="grid grid-cols-1 md:grid-cols-[360px_1fr] md:flex-1 md:min-h-0">
     <section class="bg-slate-900/60 backdrop-blur border-r border-slate-800 p-4 space-y-4 md:overflow-y-auto md:min-h-0">
+      <!-- Near me needs no route: one tap asks for the location and lists the
+           closest stops. It leads the sidebar because on a phone the sidebar
+           stacks above the map, and a phone at the roadside is where this is
+           used. -->
+      <div class="space-y-1.5">
+        <button id="nearMeBtn" class="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-sky-400 text-slate-900 font-semibold hover:bg-sky-300 transition">
+          <span aria-hidden="true">📍</span> Find water near me
+        </button>
+        <p class="text-xs text-slate-500 text-center">Fountains, taps, cafés, shops and fuel stations around you. No route needed.</p>
+      </div>
+
+      <div id="nearbyPanel" class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-2" hidden>
+        <div class="flex items-baseline justify-between gap-2">
+          <h2 class="text-sm font-medium text-slate-200">Near you</h2>
+          <span id="nearbyRadius" class="text-xs text-slate-500"></span>
+        </div>
+        <div id="nearbyFilters" class="flex flex-wrap gap-1.5" role="group" aria-label="Show these stops">
+          <button type="button" data-kind="water" aria-pressed="true" class="nearby-chip">💧 Water <span class="tabular-nums"></span></button>
+          <button type="button" data-kind="coffee" aria-pressed="true" class="nearby-chip">☕ Coffee <span class="tabular-nums"></span></button>
+          <button type="button" data-kind="shop" aria-pressed="true" class="nearby-chip">🏪 Shops &amp; fuel <span class="tabular-nums"></span></button>
+        </div>
+        <ol id="nearbyList" class="divide-y divide-slate-800 max-h-80 overflow-auto text-sm"></ol>
+        <p id="nearbyEmpty" class="text-sm text-slate-400" hidden></p>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" id="nearbyRefreshBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">↻ Refresh</button>
+          <button type="button" id="nearbyWiderBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm" hidden>Search wider</button>
+        </div>
+        <p class="text-xs text-slate-500">From OpenStreetMap: a stop can be missing, seasonal or closed, so check the hours. Tap a name to see it on the map, or Go for directions.</p>
+      </div>
+
       <div class="space-y-3">
         <label for="gpxFile" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 cursor-pointer transition">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M12 16a1 1 0 0 1-1-1V7.41L8.7 9.7a1 1 0 1 1-1.4-1.4l4-4a1 1 0 0 1 1.4 0l4 4a1 1 0 1 1-1.4 1.4L13 7.41V15a1 1 0 0 1-1 1Z"/><path d="M5 15a1 1 0 0 1 1 1v2h12v-2a1 1 0 1 1 2 0v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 2 0v2h2v-2a1 1 0 0 1 1-1Z"/></svg>
@@ -162,6 +195,14 @@
       <div class="p-4 space-y-3 text-sm text-slate-300">
         <p>This app helps you enrich a GPX or Garmin FIT route with nearby water points from OpenStreetMap.</p>
         <ol class="list-decimal pl-5 space-y-1">
+          <li>
+            Out on the road with no route loaded? Tap "📍 Find water near me". The app asks for
+            your location and lists the closest drinking water, cafés, convenience stores and
+            fuel stations, nearest first, with the distance and direction. It starts with 1.5 km
+            around you and widens to 5 km if there is little nearby; "Search wider" goes to 15 km.
+            Tap a name to see it on the map, or "Go" for directions. Bookmark
+            <code class="text-slate-200">?near</code> (or add it to your home screen) to open straight into it.
+          </li>
           <li>Load your route: click "Select GPX / FIT" or drag-and-drop a .gpx or .fit file (Garmin devices).</li>
           <li>Choose a search radius. Only water points within this distance of your route are included.</li>
           <li>The map shows found water sources (drinking water, springs, taps, park fountains with potable water, water points). Hover/tap markers for subtype and details.</li>
@@ -189,6 +230,7 @@
           <h3 class="text-slate-200 font-medium mb-2">Keyboard shortcuts</h3>
           <ul class="grid sm:grid-cols-2 gap-y-1 gap-x-4">
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">?</kbd><span>Open Help</span></li>
+            <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">M</kbd><span>Find 📍 water near me</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">L</kbd><span>Select GPX / FIT (open file)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">N</kbd><span>Clean map (reset)</span></li>
             <li class="flex items-center gap-2"><kbd class="px-2 py-0.5 rounded border border-slate-600 bg-slate-800 text-slate-200 text-xs font-mono">D</kbd><span>Download enriched GPX</span></li>
@@ -209,6 +251,12 @@
             leaves your browser apart from the anonymous OpenStreetMap queries needed to
             find water. Your choice is remembered on this device.
           </p>
+          <p class="text-slate-400 mt-2">
+            "Find water near me" uses your location only in your browser. The server gets a
+            box a few kilometres across, rounded to a ~500 m grid, and asks OpenStreetMap what is
+            in it. It keeps the answer for that box for a few hours so the next rider nearby
+            gets it faster, but nothing ties the box to you and it is never saved with a route.
+          </p>
         </div>
         <p class="text-slate-400">
           💧 Call <a href="https://x.com/greenido" target="_blank" rel="noopener" class="underline text-sky-400 hover:text-sky-300">Ido</a>
@@ -226,7 +274,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@5.8.1/dist/togeojson.umd.js" integrity="sha384-4a+9x4ql6wch9epMfqnC3bSjASMJDDqpSuVblbNd6thkfnwdBucHgePPyl0exaFY" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/togpx@0.5.4/togpx.js" integrity="sha384-VKWiOLzj25saMnPgMUQG2n3n2YzT53ahfp5hrYIWvf996S+pKveAOXPW82Ttrgrg" crossorigin="anonymous"></script>
   <!-- Overpass-Frontend via ESM shim -->
-  <script type="module" src="app.js?v=8"></script>
+  <script type="module" src="app.js?v=9"></script>
 </body>
 </html>
 

@@ -125,3 +125,23 @@ html, body { height: 100%; }
 #loading[hidden] { display: none !important; }
 
 
+
+/* Near me filters. Pressed means shown; an unpressed chip stays readable but
+   clearly off, so a rider can see what they have hidden. */
+.nearby-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border: 1px solid #334155;
+  border-radius: 9999px;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.2;
+}
+.nearby-chip[aria-pressed="false"] {
+  background: transparent;
+  color: #64748b;
+  text-decoration: line-through;
+}
