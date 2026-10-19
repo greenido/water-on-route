@@ -18,7 +18,12 @@ import {
   refillLabel,
   refillExpectation,
   rankRefillPoints,
-  fetchOSMRefillPointsAdaptive
+  fetchOSMRefillPointsAdaptive,
+  nearbyKind,
+  nearbyLabel,
+  nearbySpots,
+  directionsUrl,
+  fetchOSMNearbyPoints
 } from '../osmApi.mjs';
 
 const BBOX = { minlat: 37, minlon: -122.4, maxlat: 37.4, maxlon: -122 };
@@ -451,4 +456,82 @@ test('the client asks the proxy for the refill kind and keeps only refill stops'
   assert.deepEqual(sent[0].bbox, BBOX);
   // The cafe belongs to the coffee layer and the explicit no is disqualifying.
   assert.deepEqual(points.map(p => p.id), [1]);
+});
+
+test('nearbyKind sorts stops into water, coffee and shops', () => {
+  assert.equal(nearbyKind({ amenity: 'drinking_water' }), 'water');
+  assert.equal(nearbyKind({ amenity: 'fountain', drinking_water: 'yes' }), 'water');
+  assert.equal(nearbyKind({ amenity: 'cafe' }), 'coffee');
+  assert.equal(nearbyKind({ shop: 'coffee' }), 'coffee');
+  assert.equal(nearbyKind({ shop: 'convenience' }), 'shop');
+  assert.equal(nearbyKind({ amenity: 'fuel' }), 'shop');
+  // A cafe that also has a tap is still where you would go for coffee.
+  assert.equal(nearbyKind({ amenity: 'cafe', drinking_water: 'yes' }), 'coffee');
+});
+
+test('nearbyKind drops private taps, non-potable water and everything else', () => {
+  assert.equal(nearbyKind({ man_made: 'water_tap', access: 'private' }), null);
+  assert.equal(nearbyKind({ amenity: 'drinking_water', drinking_water: 'no' }), null);
+  assert.equal(nearbyKind({ amenity: 'fountain' }), null);
+  assert.equal(nearbyKind({ amenity: 'toilets' }), null);
+  assert.equal(nearbyKind({ natural: 'spring', name: 'Spencer Hot Springs' }), null);
+  assert.equal(nearbyKind({ natural: 'spring', temperature: '45' }), null);
+  assert.equal(nearbyKind({ natural: 'spring' }), 'water');
+  assert.equal(nearbyKind(null), null);
+});
+
+test('nearbyLabel names each kind of stop', () => {
+  assert.equal(nearbyLabel({ amenity: 'cafe' }), 'Café');
+  assert.equal(nearbyLabel({ shop: 'coffee' }), 'Coffee shop');
+  assert.equal(nearbyLabel({ amenity: 'fuel' }), 'Fuel station');
+  assert.equal(nearbyLabel({ shop: 'convenience' }), 'Convenience store');
+  assert.equal(nearbyLabel({ amenity: 'drinking_water' }), 'Drinking water');
+  assert.equal(nearbyLabel({ man_made: 'water_tap' }), 'Tap');
+});
+
+test('nearbySpots measures from the rider, trims to the circle, and puts the nearest first', () => {
+  const origin = { lat: 37.0, lon: -122.0 };
+  const spots = nearbySpots(
+    [
+      { _type: 'node', id: 1, lat: 37.005, lon: -122.0, tags: { amenity: 'cafe' } }, // ~556 m N
+      { _type: 'node', id: 2, lat: 37.001, lon: -122.0, tags: { amenity: 'drinking_water' } }, // ~111 m N
+      { _type: 'way', id: 3, center: { lat: 37.0, lon: -121.996 }, tags: { amenity: 'fuel' } }, // ~355 m E
+      { _type: 'node', id: 4, lat: 37.02, lon: -122.0, tags: { amenity: 'cafe' } }, // ~2.2 km: in the box, outside the circle
+      { _type: 'node', id: 5, lat: 37.0005, lon: -122.0, tags: { amenity: 'toilets' } } // not a stop
+    ],
+    origin,
+    1000
+  );
+  assert.deepEqual(spots.map((s) => s.id), [2, 3, 1]);
+  assert.deepEqual(spots.map((s) => s.kind), ['water', 'shop', 'coffee']);
+  assert.ok(Math.abs(spots[0]._distanceM - 111) < 2);
+  assert.ok(Math.abs(spots[1]._bearingDeg - 90) < 1, 'east of the rider');
+  // Ways are placed by their center so the map and the list can use lat/lon directly.
+  assert.equal(spots[1].lat, 37.0);
+  assert.equal(spots[1].lon, -121.996);
+});
+
+test('directionsUrl points Apple devices at Apple Maps and the rest at Google Maps', () => {
+  assert.equal(directionsUrl(37.1, -122.2), 'https://www.google.com/maps/dir/?api=1&destination=37.100000,-122.200000');
+  assert.equal(directionsUrl(37.1, -122.2, { apple: true }), 'https://maps.apple.com/?daddr=37.100000,-122.200000');
+});
+
+test('the client asks the proxy for the nearby kind and keeps only nearby stops', async () => {
+  const sent = [];
+  const fetchImpl = async (_url, options) => { sent.push(JSON.parse(options.body)); return reply(200, '<osm/>'); };
+
+  const points = await withStubbedDom(
+    [
+      { id: 1, lat: 37.1, lon: -122.1, tags: { amenity: 'drinking_water' } },
+      { id: 2, lat: 37.2, lon: -122.2, tags: { amenity: 'cafe' } },
+      { id: 3, lat: 37.3, lon: -122.3, tags: { shop: 'convenience' } },
+      { id: 4, lat: 37.4, lon: -122.4, tags: { amenity: 'fountain' } }
+    ],
+    () => fetchOSMNearbyPoints(BBOX, null, { fetchImpl })
+  );
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'nearby');
+  assert.deepEqual(sent[0].bbox, BBOX);
+  assert.deepEqual(points.map((p) => p.id), [1, 2, 3]);
 });

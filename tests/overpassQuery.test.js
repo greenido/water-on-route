@@ -6,6 +6,7 @@ const {
   buildOverpassWaterQuery,
   buildOverpassCoffeeQuery,
   buildOverpassRefillQuery,
+  buildOverpassNearbyQuery,
   buildQueryForKind
 } = require('../server/overpassQuery');
 
@@ -101,7 +102,35 @@ test('refill query does not duplicate the coffee layer', () => {
 });
 
 test('refill is a first-class kind alongside water and coffee', () => {
-  assert.deepEqual([...QUERY_KINDS].sort(), ['coffee', 'refill', 'water']);
+  assert.deepEqual([...QUERY_KINDS].sort(), ['coffee', 'nearby', 'refill', 'water']);
   assert.equal(buildQueryForKind('refill', BBOX), buildOverpassRefillQuery(BBOX));
   assert.ok(buildOverpassRefillQuery(BBOX).includes('(37,-122.4,37.4,-122)'));
+});
+
+test('nearby query covers water, coffee, shops and fuel in one request', () => {
+  const query = buildOverpassNearbyQuery(BBOX);
+  const expected = [
+    '["amenity"="drinking_water"]',
+    '["man_made"="water_tap"]',
+    '["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"]',
+    '["amenity"="cafe"]',
+    '["shop"="coffee"]',
+    '["shop"="convenience"]',
+    '["amenity"="fuel"]'
+  ];
+  for (const type of ['node', 'way', 'relation']) {
+    for (const selector of expected) {
+      assert.ok(query.includes(`${type}${selector}`), `missing ${type}${selector}`);
+    }
+  }
+  assert.ok(query.includes('(37,-122.4,37.4,-122)'));
+  assert.ok(query.includes('out body center qt;'), 'cafes mapped as buildings need centers');
+  assert.equal(buildQueryForKind('nearby', BBOX), query);
+});
+
+test('nearby query leaves out the refill stops that bury a town list', () => {
+  const query = buildOverpassNearbyQuery(BBOX);
+  assert.ok(!query.includes('"amenity"="toilets"'));
+  assert.ok(!query.includes('cemetery'));
+  assert.ok(!/node\["amenity"="fountain"\]\(/.test(query), 'decorative fountains are not water');
 });

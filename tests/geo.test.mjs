@@ -17,7 +17,11 @@ import {
   elevationProfile,
   computeBBoxFromGeoJSON,
   computeRouteLengthKm,
-  pointLonLat
+  pointLonLat,
+  bboxAroundPoint,
+  bearingDegrees,
+  compassPoint,
+  formatMeters
 } from '../geo.mjs';
 
 /** A due-east segment at the given latitude, long enough to project onto. */
@@ -423,4 +427,43 @@ test('elevationProfile downsamples long routes but keeps the endpoints', () => {
   assert.ok(profile.length <= 101, `got ${profile.length} samples`);
   assert.equal(profile[0].km, 0);
   assert.ok(profile[profile.length - 1].km > 199);
+});
+
+test('bboxAroundPoint covers the radius and snaps outward to the grid', () => {
+  const box = bboxAroundPoint(37.7749, -122.4194, 1000);
+  assert.deepEqual(box, { minlat: 37.765, minlon: -122.435, maxlat: 37.785, maxlon: -122.405 });
+  // The circle fits inside: the edges are at least 1 km from the center.
+  assert.ok(haversineMeters([-122.4194, 37.7749], [-122.4194, box.maxlat]) >= 1000);
+  assert.ok(haversineMeters([-122.4194, 37.7749], [box.minlon, 37.7749]) >= 1000);
+});
+
+test('bboxAroundPoint gives nearby riders the same box, so the server cache is shared', () => {
+  // ~50 m apart: a rider refreshing after rolling up the street. (Crossing a grid line
+  // still moves the box; the grid makes sharing the usual case, not a guarantee.)
+  assert.deepEqual(bboxAroundPoint(37.7749, -122.4194, 1000), bboxAroundPoint(37.7752, -122.4190, 1000));
+});
+
+test('bboxAroundPoint stays within valid coordinates near the poles and the antimeridian', () => {
+  const box = bboxAroundPoint(89.99, 179.99, 5000);
+  assert.ok(box.maxlat <= 90 && box.maxlon <= 180 && box.minlat >= -90 && box.minlon >= -180);
+});
+
+test('bearingDegrees and compassPoint name the direction to a stop', () => {
+  const here = [-122, 37];
+  assert.ok(Math.abs(bearingDegrees(here, [-122, 37.01])) < 0.01);
+  assert.ok(Math.abs(bearingDegrees(here, [-121.99, 37]) - 90) < 0.1);
+  assert.equal(compassPoint(bearingDegrees(here, [-122.01, 36.99])), 'SW');
+  assert.deepEqual([0, 44, 90, 135, 180, 225, 270, 315, 350].map(compassPoint), ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'N']);
+  assert.equal(compassPoint(NaN), '');
+});
+
+test('formatMeters reads at walking scale', () => {
+  assert.equal(formatMeters(3), '10 m');
+  assert.equal(formatMeters(447), '450 m');
+  assert.equal(formatMeters(994), '990 m');
+  assert.equal(formatMeters(1240), '1.2 km');
+  assert.equal(formatMeters(1500), '1.5 km');
+  assert.equal(formatMeters(5000), '5 km');
+  assert.equal(formatMeters(15000), '15 km');
+  assert.equal(formatMeters(Infinity), '—');
 });

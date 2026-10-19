@@ -8,6 +8,12 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 
 ## Features
 
+- **Find water near me** (built for phones): one tap, no route needed. The app asks for
+  your location and lists the closest drinking water, cafés, convenience stores and fuel
+  stations, nearest first, with distance, direction, hours and a "Go" button that opens
+  directions (Apple Maps on iPhone, Google Maps elsewhere). It searches 1.5 km around you,
+  widens to 5 km when there is little nearby, and "Search wider" goes to 15 km. Open
+  `/?near` (or add it to your home screen) to start straight into a search
 - Upload or drag-and-drop a `.gpx` or Garmin `.fit` file
 - Interactive map with your route, water markers, and optional coffee markers
 - Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
@@ -88,6 +94,10 @@ Notes:
   - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
   - Split quads are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
+  - Near me: takes one position fix, sends a box around it (padded out to a ~500 m grid so
+    riders close together share the server cache), and asks for the `nearby` kind, which is
+    water, coffee, convenience stores and fuel in a single Overpass query. Results are trimmed
+    back to the circle and sorted by distance. Private taps (`access=private|no`) are dropped
 
 - Backend (`server/index.js`)
   - Serves static frontend files
@@ -211,7 +221,7 @@ The Express server exposes a few endpoints:
 - `GET /app.js`, `GET /styles.css`, `GET /osmApi.mjs`, `GET /test.html` – static assets
 - `GET /health` – simple health check
 - `POST /api/overpass` – Overpass proxy
-  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" | "refill" }`
+  - Body (JSON): `{ bbox: { minlat, minlon, maxlat, maxlon }, kind: "water" | "coffee" | "refill" | "nearby" }`
   - The Overpass QL is built server-side from these two inputs; client-supplied
     query text is never forwarded, so the endpoint cannot be used as an open relay
   - Same-origin requests only; a bbox spanning more than 12° on a side is rejected
@@ -255,6 +265,9 @@ The Express server exposes a few endpoints:
 - Saving a route is disclosed in the sidebar and can be switched off; the choice
   is remembered per device. With it off, nothing but anonymous OpenStreetMap
   queries leaves the browser, and the map and enriched download still work.
+- "Find water near me" uses your location only in the browser. The server sees a box a few
+  kilometres across, rounded to a ~500 m grid, and keeps OpenStreetMap's answer for that box
+  in its in-memory cache. The box is never written to the database or tied to a route.
 - Stored addresses are reduced to a coarse network before they are written:
   IPv4 keeps the `/24`, IPv6 keeps the `/48`. Full addresses are never persisted.
 - The city lookup that sends addresses to `ipapi.co` is opt-in via

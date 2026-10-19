@@ -1,5 +1,7 @@
 // Small, dependency-free OSM API utilities with adaptive splitting and backoff
 
+import { haversineMeters, bearingDegrees } from './geo.mjs';
+
 export function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /**
@@ -460,4 +462,87 @@ export function rankCoffeePoints(points) {
 
 export function sortPointsByDistance(points) {
   return [...points].sort((a, b) => (a._distanceM ?? Infinity) - (b._distanceM ?? Infinity));
+}
+
+/**
+ * "Near me": what kind of stop a place is, from where the rider is standing.
+ *
+ * Coffee is checked before water because a café tagged drinking_water=yes is
+ * still a café to the rider; fuel stations and convenience stores are the
+ * "buy a bottle" tier. Private taps are dropped: you cannot ride up to them,
+ * and so are hot springs, which the spring rule would otherwise call water.
+ *
+ * @returns {'water'|'coffee'|'shop'|null}
+ */
+export function nearbyKind(tags) {
+  if (!tags || typeof tags !== 'object') return null;
+  if (tags.access === 'private' || tags.access === 'no') return null;
+  if (isHotSpring(tags)) return null;
+  if (isCoffeeTags(tags)) return 'coffee';
+  if (tags.amenity === 'fuel' || tags.shop === 'convenience') return 'shop';
+  if (isPotableWaterTags(tags)) return 'water';
+  return null;
+}
+
+function isHotSpring(tags) {
+  return tags.natural === 'hot_spring'
+    || tags['bath:type'] === 'hot_spring'
+    || /hot\s*spring/i.test(tags.name || '')
+    || Number.parseFloat(tags.temperature) >= 30;
+}
+
+/** Short label for a nearby stop, e.g. "Fountain", "Café", "Fuel station". */
+export function nearbyLabel(tags) {
+  const t = tags || {};
+  switch (nearbyKind(t)) {
+    case 'coffee': return t.shop === 'coffee' ? 'Coffee shop' : 'Café';
+    case 'shop': return refillLabel(t);
+    case 'water': {
+      const subtype = waterSubtypeLabel(t);
+      return subtype.charAt(0).toUpperCase() + subtype.slice(1);
+    }
+    default: return 'Stop';
+  }
+}
+
+/**
+ * Turn raw Overpass points into the "near me" list: classified, measured from
+ * the rider, trimmed from the padded box back to the circle, nearest first.
+ *
+ * @param {Array<object>} points from fetchOSMNearbyPoints
+ * @param {{lat: number, lon: number}} origin where the rider is
+ * @param {number} radiusM keep only stops this close
+ */
+export function nearbySpots(points, origin, radiusM) {
+  const here = [origin.lon, origin.lat];
+  const spots = [];
+  for (const p of points || []) {
+    const lat = p.lat ?? p.center?.lat;
+    const lon = p.lon ?? p.center?.lon;
+    const kind = nearbyKind(p.tags);
+    if (!kind || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const distanceM = haversineMeters(here, [lon, lat]);
+    if (distanceM > radiusM) continue;
+    spots.push({ ...p, lat, lon, kind, _distanceM: distanceM, _bearingDeg: bearingDegrees(here, [lon, lat]) });
+  }
+  return sortPointsByDistance(spots);
+}
+
+/**
+ * Directions to a stop. iPhones get Apple Maps, which opens without asking;
+ * everything else gets Google Maps, which Android hands to its own app.
+ */
+export function directionsUrl(lat, lon, { apple = false } = {}) {
+  const dest = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+  return apple
+    ? `https://maps.apple.com/?daddr=${dest}`
+    : `https://www.google.com/maps/dir/?api=1&destination=${dest}`;
+}
+
+export async function fetchOSMNearbyPoints(bbox, onProgress, options = {}) {
+  return fetchOverpassPointsAdaptive(bbox, onProgress, {
+    ...options,
+    kind: 'nearby',
+    parseXml: (xml) => parseOsmXmlGeneric(xml).filter((p) => nearbyKind(p.tags) !== null),
+  });
 }

@@ -9,7 +9,7 @@
  */
 
 /** Kinds a client may ask for. Anything else is rejected. */
-const QUERY_KINDS = Object.freeze(['water', 'coffee', 'refill']);
+const QUERY_KINDS = Object.freeze(['water', 'coffee', 'refill', 'nearby']);
 
 const COFFEE_CUISINE_RE = 'coffee|cafe|coffee_shop|espresso';
 
@@ -106,10 +106,44 @@ ${forEachElementType(selectors, bboxPart(b))}
   `;
 }
 
+/**
+ * Everything worth riding to from where you stand: potable water, coffee,
+ * and the shops and fuel stations that will sell you a bottle.
+ *
+ * One query rather than water + coffee + refill back to back: the public
+ * endpoint gives each client two slots, and on a phone at the roadside three
+ * round trips of 10–30 s each is the difference between useful and not.
+ * The box is small (a few km around the rider), so the combined query stays
+ * cheap. Toilets, campsites and cemeteries from the refill query are left out
+ * on purpose: in town they bury the list, and the route search still has them.
+ */
+function buildOverpassNearbyQuery(b) {
+  const selectors = [
+    '["amenity"="drinking_water"]',
+    '["natural"="spring"]',
+    '["man_made"="water_tap"]',
+    '["amenity"="water_point"]',
+    '["amenity"="fountain"]["drinking_water"~"^(yes|compatible)$"]',
+    '["drinking_water"~"^(yes|compatible)$"]',
+    '["amenity"="cafe"]',
+    '["shop"="coffee"]',
+    '["shop"="convenience"]',
+    '["amenity"="fuel"]'
+  ];
+  return `
+    [out:xml][timeout:25];
+    (
+${forEachElementType(selectors, bboxPart(b))}
+    );
+    out body center qt;
+  `;
+}
+
 const BUILDERS = Object.freeze({
   water: buildOverpassWaterQuery,
   coffee: buildOverpassCoffeeQuery,
-  refill: buildOverpassRefillQuery
+  refill: buildOverpassRefillQuery,
+  nearby: buildOverpassNearbyQuery
 });
 
 /**
@@ -127,5 +161,6 @@ module.exports = {
   buildOverpassWaterQuery,
   buildOverpassCoffeeQuery,
   buildOverpassRefillQuery,
+  buildOverpassNearbyQuery,
   buildQueryForKind
 };

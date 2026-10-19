@@ -421,3 +421,66 @@ export function computeRouteLengthKm(geojson) {
   }
   return meters / 1000;
 }
+
+/**
+ * A box covering radiusM around a point, padded out to a grid.
+ *
+ * The padding is what makes "near me" cheap: two riders at the same café, or
+ * one rider refreshing after rolling 100 m, ask for the identical box, so the
+ * server's Overpass cache answers instead of the public endpoint. Callers trim
+ * the extra back to the circle by distance.
+ *
+ * @param {number} lat degrees
+ * @param {number} lon degrees
+ * @param {number} radiusM metres
+ * @param {number} [gridDeg] grid step in degrees (0.005° ≈ 550 m of latitude)
+ * @returns {{minlat: number, minlon: number, maxlat: number, maxlon: number}}
+ */
+export function bboxAroundPoint(lat, lon, radiusM, gridDeg = 0.005) {
+  const metresPerDegLat = EARTH_RADIUS_M * DEG_TO_RAD;
+  // Floor the cosine so a box near a pole stays finite instead of spanning the globe.
+  const metresPerDegLon = metresPerDegLat * Math.max(Math.cos(lat * DEG_TO_RAD), 0.01);
+  const dLat = radiusM / metresPerDegLat;
+  const dLon = radiusM / metresPerDegLon;
+  // toFixed keeps 37.765 from becoming 37.765000000000001 and missing the cache.
+  const snap = (v, round) => Number((round(v / gridDeg) * gridDeg).toFixed(6));
+  const clamp = (v, limit) => Math.min(limit, Math.max(-limit, v));
+  return {
+    minlat: clamp(snap(lat - dLat, Math.floor), 90),
+    minlon: clamp(snap(lon - dLon, Math.floor), 180),
+    maxlat: clamp(snap(lat + dLat, Math.ceil), 90),
+    maxlon: clamp(snap(lon + dLon, Math.ceil), 180)
+  };
+}
+
+/**
+ * Initial compass bearing from a to b, both [lon, lat].
+ * @returns {number} degrees in [0, 360)
+ */
+export function bearingDegrees(a, b) {
+  const lat1 = a[1] * DEG_TO_RAD;
+  const lat2 = b[1] * DEG_TO_RAD;
+  const dLon = (b[0] - a[0]) * DEG_TO_RAD;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return (Math.atan2(y, x) / DEG_TO_RAD + 360) % 360;
+}
+
+const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+/** Nearest of the eight compass points, e.g. 40 → "NE". */
+export function compassPoint(deg) {
+  if (!Number.isFinite(deg)) return '';
+  return COMPASS_POINTS[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+}
+
+/**
+ * Walking-scale distance: "80 m", "450 m", "1.2 km", "5 km". Metres are
+ * rounded to 10 because GPS on a phone is rarely better than that, and a
+ * whole number of km drops its ".0" so a radius reads "within 5 km".
+ */
+export function formatMeters(m) {
+  if (!Number.isFinite(m)) return '—';
+  if (m < 995) return `${Math.max(10, Math.round(m / 10) * 10)} m`;
+  return `${formatKm(m / 1000).replace(/\.0$/, '')} km`;
+}

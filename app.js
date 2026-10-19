@@ -19,7 +19,9 @@
  * UX features:
  *   - Drag & drop or file picker for GPX / FIT
  *   - Base layer switcher and animated water markers
- *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download, 'F' refill, 'C' coffee, 'W' waypoints
+ *   - Keyboard: '?' help, 'N' new, 'L' load, 'D' download, 'F' refill, 'C' coffee, 'W' waypoints, 'M' near me
+ *   - Near me: no route needed; lists the closest water, cafés, shops and fuel
+ *     around the rider's location (also opened by ?near in the URL)
  */
 
 import {
@@ -32,6 +34,10 @@ import {
   refillLabel,
   refillConfidence,
   refillExpectation,
+  fetchOSMNearbyPoints,
+  nearbySpots,
+  nearbyLabel,
+  directionsUrl,
 } from './osmApi.mjs';
 import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
 import {
@@ -43,6 +49,9 @@ import {
   longestDryStretch,
   elevationProfile,
   formatKm,
+  bboxAroundPoint,
+  compassPoint,
+  formatMeters,
 } from './geo.mjs';
 
 // Basic UI elements
@@ -111,6 +120,14 @@ const navNewBtn = document.getElementById('navNewBtn');
 const navHelpBtn = document.getElementById('navHelpBtn');
 const navCoffeeBtn = document.getElementById('navCoffeeBtn');
 const navRefillBtn = document.getElementById('navRefillBtn');
+const nearMeBtn = document.getElementById('nearMeBtn');
+const nearbyPanel = document.getElementById('nearbyPanel');
+const nearbyRadiusEl = document.getElementById('nearbyRadius');
+const nearbyFiltersEl = document.getElementById('nearbyFilters');
+const nearbyListEl = document.getElementById('nearbyList');
+const nearbyEmptyEl = document.getElementById('nearbyEmpty');
+const nearbyRefreshBtn = document.getElementById('nearbyRefreshBtn');
+const nearbyWiderBtn = document.getElementById('nearbyWiderBtn');
 const helpModal = document.getElementById('helpModal');
 const helpOverlay = document.getElementById('helpOverlay');
 const helpPanel = document.getElementById('helpPanel');
@@ -256,6 +273,9 @@ const refillIcon = (confidence) => L.divIcon({
 });
 let coffeeLayer = L.layerGroup().addTo(map);
 const baseCoffeeIcon = () => L.divIcon({ className: 'water-marker', html: '☕', iconSize: [24, 24], iconAnchor: [12, 12] });
+// Near me draws on its own layer so a route search and a roadside search can
+// share the map without clearing each other.
+let nearbyLayer = L.layerGroup().addTo(map);
 let originalGpxText = '';
 let foundWaterPoints = [];
 let foundCoffeePoints = [];
@@ -275,7 +295,7 @@ let currentRouteIndex = null;
 let currentRouteKm = 0;
 
 // Layers control: allow switching base maps and toggling overlays
-layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Refill Stops': refillLayer, 'Coffee': coffeeLayer }, { collapsed: true }).addTo(map);
+layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Refill Stops': refillLayer, 'Coffee': coffeeLayer, 'Near me': nearbyLayer }, { collapsed: true }).addTo(map);
 
 // Helpers
 function setStatus(msg) {
@@ -991,6 +1011,7 @@ function resetApp() {
     if (waterLayer) { waterLayer.clearLayers(); }
     if (refillLayer) { refillLayer.clearLayers(); }
     if (coffeeLayer) { coffeeLayer.clearLayers(); }
+    clearNearby();
     // Reset state
     currentRouteGeoJSON = null;
     originalGpxText = '';
@@ -1416,6 +1437,301 @@ if (navCoffeeBtn) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Near me: the closest water, coffee and shops to wherever the rider is.
+// ---------------------------------------------------------------------------
+
+// 1.5 km is a few minutes on the bike; 5 km catches the next village. The
+// search widens on its own only that far: 15 km is one tap away, because in a
+// town it is thousands of cafés and a slow answer.
+const NEARBY_RADII_M = [1500, 5000, 15000];
+const NEARBY_AUTO_WIDEN_UP_TO = 1;
+// Fewer than this and the first ring is not worth stopping at.
+const NEARBY_ENOUGH = 5;
+// Past this many there is no point offering an even wider search.
+const NEARBY_PLENTY = 100;
+// The map frames the rider and this many of the closest stops, not the whole ring.
+const NEARBY_FIT_COUNT = 8;
+const NEARBY_ICONS = { water: '💧', coffee: '☕', shop: '🏪' };
+const nearbyIconHtml = (p) => (p.kind === 'shop' && p.tags?.amenity === 'fuel' ? '⛽' : NEARBY_ICONS[p.kind]);
+// iPhones open Apple Maps from a plain link; iPadOS reports itself as a Mac with touch.
+const IS_APPLE_MOBILE = /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const MSG_LOCATING = 'Finding where you are …';
+const msgNearby = (radiusM) => `Looking for water within ${formatMeters(radiusM)} of you …`;
+
+let nearby = { origin: null, radiusIndex: 0, spots: [] };
+const nearbyHidden = new Set();
+// Each search takes a ticket; a slower, older one finishing late is ignored.
+let nearbyRun = 0;
+const nearbyMarkers = new Map();
+
+/**
+ * The rider's position as a promise, with errors worded for the roadside
+ * rather than the Geolocation spec.
+ */
+function locateRider() {
+  return new Promise((resolve, reject) => {
+    if (!('geolocation' in navigator)) {
+      reject(new Error("This browser can't share your location, so it can't look around you."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve({ lat: coords.latitude, lon: coords.longitude, accuracyM: coords.accuracy }),
+      (err) => {
+        const messages = {
+          1: 'Location is blocked for this site. Allow it in your browser settings, then tap "Find water near me" again.',
+          2: "Couldn't get a location fix. Try again somewhere with a clearer view of the sky.",
+          3: 'Finding your location took too long. Try again.'
+        };
+        reject(new Error(messages[err && err.code] || "Couldn't get your location."));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    );
+  });
+}
+
+// The public Overpass server turns queries away when it is full. A near-me box
+// is too small to gain anything from splitting, so wait a moment and ask once more.
+const OVERPASS_BUSY = new Set([429, 502, 503, 504]);
+const MSG_OVERPASS_BUSY = "OpenStreetMap's server is busy right now. Try again in a minute.";
+// The public endpoint queues requests, and 30 s answers are normal when it is
+// busy. Wait a little longer than the proxy's own 60 s upstream timeout, so the
+// proxy's 504 (and the answer it caches for next time) arrives before we give up.
+const NEARBY_TIMEOUT_MS = 65000;
+async function fetchNearbyOnce(bbox, onProgress) {
+  const options = { minSpan: 1, initialBackoffMs: 0, timeoutMs: NEARBY_TIMEOUT_MS };
+  try {
+    return await fetchOSMNearbyPoints(bbox, onProgress, options);
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(MSG_OVERPASS_BUSY);
+    if (!OVERPASS_BUSY.has(err.status)) throw err;
+    await new Promise((r) => setTimeout(r, 3000));
+    try {
+      return await fetchOSMNearbyPoints(bbox, onProgress, options);
+    } catch (retryErr) {
+      if (retryErr.name === 'AbortError' || OVERPASS_BUSY.has(retryErr.status)) throw new Error(MSG_OVERPASS_BUSY);
+      throw retryErr;
+    }
+  }
+}
+
+/**
+ * Locate the rider and search outward until something turns up.
+ *
+ * @param {object} [options]
+ * @param {number} [options.startIndex] first radius to try (Search wider skips ahead)
+ * @param {boolean} [options.relocate] ask for a fresh position (Search wider reuses the last one)
+ */
+async function findNearby({ startIndex = 0, relocate = true } = {}) {
+  const run = ++nearbyRun;
+  setError('');
+  setStatus(MSG_LOCATING);
+  showLoading(true);
+  try {
+    const here = relocate || !nearby.origin ? await locateRider() : nearby.origin;
+    if (run !== nearbyRun) return;
+
+    let index = startIndex;
+    let spots = [];
+    for (;;) {
+      const radiusM = NEARBY_RADII_M[index];
+      const message = msgNearby(radiusM);
+      setStatus(message);
+      const points = await fetchNearbyOnce(bboxAroundPoint(here.lat, here.lon, radiusM), overpassProgress(message));
+      if (run !== nearbyRun) return;
+      spots = nearbySpots(points, here, radiusM);
+      const canWiden = index < Math.max(startIndex, NEARBY_AUTO_WIDEN_UP_TO) && index < NEARBY_RADII_M.length - 1;
+      if (spots.length >= NEARBY_ENOUGH || !canWiden) break;
+      index++;
+    }
+
+    nearby = { origin: here, radiusIndex: index, spots };
+    renderNearby(true);
+    setStatus(spots.length
+      ? `Found ${spots.length} stops within ${formatMeters(NEARBY_RADII_M[index])} of you.`
+      : `Nothing found within ${formatMeters(NEARBY_RADII_M[index])} of you.`);
+  } catch (err) {
+    if (run !== nearbyRun) return;
+    console.error(err);
+    setError(err.message || String(err));
+    setStatus('');
+  } finally {
+    showLoading(false);
+  }
+}
+
+function clearNearby() {
+  nearbyRun++;
+  nearby = { origin: null, radiusIndex: 0, spots: [] };
+  nearbyLayer.clearLayers();
+  nearbyMarkers.clear();
+  if (nearbyPanel) nearbyPanel.hidden = true;
+  if (nearbyListEl) nearbyListEl.replaceChildren();
+}
+
+const nearbyKey = (p) => `${p._type || 'node'}:${p.id}`;
+const nearbyDistanceText = (p) => `${formatMeters(p._distanceM)} ${compassPoint(p._bearingDeg)}`.trim();
+const nearbyDirections = (p) => directionsUrl(p.lat, p.lon, { apple: IS_APPLE_MOBILE });
+
+function nearbyPopup(p) {
+  const tags = p.tags || {};
+  const label = nearbyLabel(tags);
+  const popup = document.createElement('div');
+  const title = document.createElement('b');
+  title.textContent = tags.name || tags.brand || label;
+  popup.appendChild(title);
+  const addLine = (text) => {
+    if (!text) return;
+    const line = document.createElement('div');
+    line.textContent = text;
+    popup.appendChild(line);
+  };
+  if (tags.name || tags.brand) addLine(label);
+  addLine(`${nearbyDistanceText(p)} from you`);
+  addLine(tags.opening_hours ? `Hours: ${tags.opening_hours}` : null);
+  const link = document.createElement('a');
+  link.href = nearbyDirections(p);
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = 'Directions';
+  popup.appendChild(link);
+  return popup;
+}
+
+/** Pan to a stop and open its popup; on a phone, bring the map (below the list) into view. */
+function focusNearbySpot(p) {
+  const marker = nearbyMarkers.get(nearbyKey(p));
+  if (!marker) return;
+  map.setView([p.lat, p.lon], Math.max(map.getZoom(), 17));
+  marker.openPopup();
+  if (window.matchMedia('(max-width: 767px)').matches) {
+    document.getElementById('map')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+function renderNearby(animate = false) {
+  if (!nearbyPanel || !nearby.origin) return;
+  const { origin, spots, radiusIndex } = nearby;
+  const shown = spots.filter((p) => !nearbyHidden.has(p.kind));
+  nearbyPanel.hidden = false;
+
+  const radiusM = NEARBY_RADII_M[radiusIndex];
+  nearbyRadiusEl.textContent = `within ${formatMeters(radiusM)}`;
+  for (const chip of nearbyFiltersEl.querySelectorAll('[data-kind]')) {
+    const kind = chip.dataset.kind;
+    chip.setAttribute('aria-pressed', String(!nearbyHidden.has(kind)));
+    chip.querySelector('span').textContent = String(spots.filter((p) => p.kind === kind).length);
+  }
+
+  // List: nearest first, the name opens it on the map, Go hands off to a maps app.
+  const rows = shown.map((p) => {
+    const tags = p.tags || {};
+    const label = nearbyLabel(tags);
+    const li = document.createElement('li');
+    li.className = 'flex items-center gap-2 py-1.5';
+
+    const show = document.createElement('button');
+    show.type = 'button';
+    show.className = 'flex-1 min-w-0 flex items-center gap-2 text-left rounded-md px-1 py-1 hover:bg-slate-800/60';
+    const icon = document.createElement('span');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = nearbyIconHtml(p);
+    const text = document.createElement('span');
+    text.className = 'min-w-0';
+    const name = document.createElement('span');
+    name.className = 'block truncate text-slate-100';
+    name.textContent = tags.name || tags.brand || label;
+    const detail = document.createElement('span');
+    detail.className = 'block truncate text-xs text-slate-400';
+    detail.textContent = [tags.name || tags.brand ? label : null, tags.opening_hours].filter(Boolean).join(' · ');
+    text.append(name, detail);
+    show.append(icon, text);
+    show.addEventListener('click', () => focusNearbySpot(p));
+
+    const distance = document.createElement('span');
+    distance.className = 'shrink-0 text-xs text-slate-300 tabular-nums';
+    distance.textContent = nearbyDistanceText(p);
+
+    const go = document.createElement('a');
+    go.href = nearbyDirections(p);
+    go.target = '_blank';
+    go.rel = 'noopener';
+    go.className = 'shrink-0 px-3 py-1.5 rounded-md bg-sky-400 text-slate-900 text-xs font-semibold hover:bg-sky-300';
+    go.textContent = 'Go';
+    go.setAttribute('aria-label', `Directions to ${name.textContent}, ${distance.textContent}`);
+
+    li.append(show, distance, go);
+    return li;
+  });
+  nearbyListEl.replaceChildren(...rows);
+
+  nearbyEmptyEl.hidden = shown.length > 0;
+  nearbyEmptyEl.textContent = spots.length
+    ? 'Everything here is filtered out. Turn a filter back on.'
+    : `OpenStreetMap has nothing within ${formatMeters(radiusM)} of you.`;
+  const canWiden = radiusIndex < NEARBY_RADII_M.length - 1 && spots.length < NEARBY_PLENTY;
+  nearbyWiderBtn.hidden = !canWiden;
+  if (canWiden) nearbyWiderBtn.textContent = `Search within ${formatMeters(NEARBY_RADII_M[radiusIndex + 1])}`;
+
+  // Map: the rider, how sure the phone is of that, and the stops.
+  nearbyLayer.clearLayers();
+  nearbyMarkers.clear();
+  if (origin.accuracyM > 0 && origin.accuracyM < 2000) {
+    L.circle([origin.lat, origin.lon], {
+      radius: origin.accuracyM, color: '#38bdf8', weight: 1, opacity: 0.6, fillOpacity: 0.08, interactive: false
+    }).addTo(nearbyLayer);
+  }
+  L.circleMarker([origin.lat, origin.lon], {
+    radius: 8, color: '#ffffff', weight: 3, fillColor: '#0ea5e9', fillOpacity: 1
+  }).bindTooltip('You are here').addTo(nearbyLayer);
+
+  shown.forEach((p, idx) => {
+    const tags = p.tags || {};
+    const marker = L.marker([p.lat, p.lon], {
+      title: tags.name || tags.brand || nearbyLabel(tags),
+      icon: L.divIcon({ className: 'water-marker', html: nearbyIconHtml(p), iconSize: [24, 24], iconAnchor: [12, 12] }),
+      zIndexOffset: POI_Z_OFFSET
+    }).bindPopup(nearbyPopup(p)).addTo(nearbyLayer);
+    nearbyMarkers.set(nearbyKey(p), marker);
+    if (animate) {
+      marker.on('add', () => {
+        requestAnimationFrame(() => {
+          const el = marker.getElement();
+          if (el) {
+            el.classList.add('drop-anim');
+            el.style.animationDelay = `${Math.min(idx * 15, 600)}ms`;
+          }
+        });
+      });
+    }
+  });
+
+  if (animate) {
+    const framed = [[origin.lat, origin.lon], ...shown.slice(0, NEARBY_FIT_COUNT).map((p) => [p.lat, p.lon])];
+    if (framed.length > 1) map.fitBounds(L.latLngBounds(framed), { padding: [32, 32], maxZoom: 17 });
+    else map.setView([origin.lat, origin.lon], 15);
+  }
+}
+
+if (nearMeBtn) nearMeBtn.addEventListener('click', () => findNearby());
+if (nearbyRefreshBtn) nearbyRefreshBtn.addEventListener('click', () => findNearby());
+if (nearbyWiderBtn) {
+  nearbyWiderBtn.addEventListener('click', () => {
+    findNearby({ startIndex: Math.min(nearby.radiusIndex + 1, NEARBY_RADII_M.length - 1), relocate: false });
+  });
+}
+if (nearbyFiltersEl) {
+  nearbyFiltersEl.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-kind]');
+    if (!chip) return;
+    const kind = chip.dataset.kind;
+    if (nearbyHidden.has(kind)) nearbyHidden.delete(kind);
+    else nearbyHidden.add(kind);
+    renderNearby(false);
+  });
+}
+
 function bindHideHelp() {
   showHelpModal(false);
 }
@@ -1446,6 +1762,12 @@ document.addEventListener('keydown', (e) => {
   if (!isTyping && (e.key === 'N' || e.key === 'n')) {
     e.preventDefault();
     resetApp();
+    return;
+  }
+  // 'M' finds water near me
+  if (!isTyping && (e.key === 'M' || e.key === 'm')) {
+    e.preventDefault();
+    findNearby();
     return;
   }
   // 'L' opens file chooser
@@ -1534,5 +1856,7 @@ try {
   }
 } catch (_) {}
 
-
-
+// ?near opens straight into a near-me search: a home-screen bookmark for the roadside.
+try {
+  if (new URLSearchParams(window.location.search).has('near')) findNearby();
+} catch (_) {}
