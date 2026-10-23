@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.9
 
 # Adjust NODE_VERSION as desired. undici requires Node >= 22.19.0.
-ARG NODE_VERSION=22.22.0
+ARG NODE_VERSION=24.22.1
 # Pinned to trixie: the sqlite3 prebuilt binary needs glibc >= 2.38, which bookworm (2.36) lacks.
 FROM node:${NODE_VERSION}-trixie-slim AS base
 
