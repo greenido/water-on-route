@@ -70,6 +70,7 @@ let busyStartedAt = 0;
 let busyTimer = null;
 const downloadBtn = document.getElementById('downloadBtn');
 const shareBtn = document.getElementById('shareBtn');
+const unshareBtn = document.getElementById('unshareBtn');
 const radiusSelect = document.getElementById('radiusSelect');
 const saveRouteToggle = document.getElementById('saveRouteToggle');
 const summaryEl = document.getElementById('summary');
@@ -735,10 +736,6 @@ async function saveRoute(points) {
       body: JSON.stringify(payload)
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json().catch(() => null);
-    if (data && data.shareToken) {
-      currentShareToken = data.shareToken;
-    }
   } catch (err) {
     // Saving is best-effort telemetry; never block the user's map on it.
     savedRouteForFile = false;
@@ -746,9 +743,24 @@ async function saveRoute(points) {
   }
 }
 
+// Proof that this device created a share link, so it can delete it later.
+// Held per device: losing it only means the link has to be removed by the admin.
+const SHARE_DELETE_TOKENS_KEY = 'wor.shareDeleteTokens';
+let shareDeleteTokens = {};
+try { shareDeleteTokens = JSON.parse(localStorage.getItem(SHARE_DELETE_TOKENS_KEY)) || {}; } catch (_) {}
+
+function persistShareDeleteTokens() {
+  try { localStorage.setItem(SHARE_DELETE_TOKENS_KEY, JSON.stringify(shareDeleteTokens)); } catch (_) {}
+}
+
+function setShareToken(token) {
+  currentShareToken = token;
+  if (unshareBtn) unshareBtn.hidden = !(token && shareDeleteTokens[token]);
+}
+
 /**
- * Ensures the currently loaded route is persisted to obtain a shareToken.
- * Can be called explicitly when user clicks Share even if automatic saving is off.
+ * Asks the server for a link to the current route, storing it if need be. Only
+ * ever called when the user clicks Share, whatever the save setting says.
  */
 async function ensureRouteSaved() {
   if (currentShareToken) return currentShareToken;
@@ -760,21 +772,59 @@ async function ensureRouteSaved() {
     bbox: computeBBoxFromGeoJSON(currentRouteGeoJSON),
     routeKm: Number(computeRouteLengthKm(currentRouteGeoJSON).toFixed(2)),
     waypointsCount: points.length,
-    waterPoints: points
+    waterPoints: points,
+    share: true
   };
   const resp = await fetch('/api/routes', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    const failure = await resp.json().catch(() => null);
+    throw new Error(failure?.error || `HTTP ${resp.status}`);
+  }
   const data = await resp.json();
   if (data && data.shareToken) {
-    currentShareToken = data.shareToken;
+    if (data.deleteToken) {
+      shareDeleteTokens[data.shareToken] = data.deleteToken;
+      persistShareDeleteTokens();
+    }
+    setShareToken(data.shareToken);
     savedRouteForFile = true;
     return currentShareToken;
   }
   return null;
+}
+
+/** Take the current route's share link down, for the device that created it. */
+async function deleteShareLink() {
+  const token = currentShareToken;
+  const deleteToken = token && shareDeleteTokens[token];
+  if (!deleteToken) return;
+  if (!confirm('Delete this share link? Anyone who has it will no longer be able to open the route. This cannot be undone.')) return;
+  setError('');
+  try {
+    const resp = await fetch(`/api/shared-routes/${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      headers: { 'X-Delete-Token': deleteToken }
+    });
+    // A 404 means it is already gone, which is what was asked for.
+    if (!resp.ok && resp.status !== 404) {
+      const failure = await resp.json().catch(() => null);
+      throw new Error(failure?.error || `HTTP ${resp.status}`);
+    }
+    delete shareDeleteTokens[token];
+    persistShareDeleteTokens();
+    setShareToken(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('route');
+    window.history.replaceState({}, '', url);
+    showToast('Share link deleted.');
+  } catch (err) {
+    console.error('[deleteShareLink] failed', err);
+    setError('Failed to delete the share link: ' + (err.message || String(err)));
+  }
 }
 
 /**
@@ -1022,7 +1072,7 @@ function resetApp() {
     lastNearWaterPoints = [];
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
-    currentShareToken = null;
+    setShareToken(null);
     currentRouteIndex = null;
     currentRouteKm = 0;
     downloadBtn.disabled = true;
@@ -1212,7 +1262,7 @@ async function loadSharedRoute(token) {
 
     currentRouteFilename = data.filename || 'shared-route.gpx';
     originalGpxText = data.gpxText;
-    currentShareToken = data.shareToken || parsed;
+    setShareToken(data.shareToken || parsed);
     savedRouteForFile = true;
 
     // Parse GPX to GeoJSON
@@ -1272,7 +1322,7 @@ async function handleRouteFile(file) {
   // A new file is a new route: allow exactly one save for it.
   currentRouteFilename = storageFilenameFor(file);
   savedRouteForFile = false;
-  currentShareToken = null;
+  setShareToken(null);
   // Project the route once; every later radius change and export reuses this.
   currentRouteIndex = buildRouteIndex(geojson);
   currentRouteKm = currentRouteIndex.totalM / 1000;
@@ -1331,6 +1381,10 @@ if (shareBtn) {
   shareBtn.addEventListener('click', () => {
     shareRoute().catch(err => setError(err.message || String(err)));
   });
+}
+
+if (unshareBtn) {
+  unshareBtn.addEventListener('click', () => { deleteShareLink(); });
 }
 
 setStatus('Load a GPX or FIT file to begin.');

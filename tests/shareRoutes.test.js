@@ -28,9 +28,10 @@ test.after(() => {
   } catch (_) {}
 });
 
-test('insertRoute automatically generates a valid shareToken', async () => {
+test('insertRoute stores the shareToken it is given', async () => {
   const payload = {
     filename: 'mount-tam.gpx',
+    shareToken: 'c0ffee00c0ffee00c0ffee00c0ffee00',
     fileSize: 1234,
     bbox: { minlat: 37.8, minlon: -122.6, maxlat: 37.9, maxlon: -122.5 },
     routeKm: 42.5,
@@ -42,12 +43,8 @@ test('insertRoute automatically generates a valid shareToken', async () => {
 
   const result = await insertRoute(payload);
   assert.ok(result.id > 0, 'Should have positive numeric ID');
-  assert.ok(result.shareToken, 'Should return a shareToken');
-  assert.equal(typeof result.shareToken, 'string');
+  assert.equal(result.shareToken, payload.shareToken);
   assert.equal(validateShareToken(result.shareToken), true, 'shareToken must satisfy validateShareToken');
-  // base64url uses _ which Slack/markdown split, turning ?route=ab_cd into ?route=ab
-  // (HTTP 400: too short). Hex never hits that class of chat-app URL breakers.
-  assert.match(result.shareToken, /^[0-9a-f]{32}$/);
 
   const row = await getRouteById(result.id);
   assert.equal(row.shareToken, result.shareToken, 'getRouteById must return the shareToken');
@@ -57,6 +54,7 @@ test('insertRoute automatically generates a valid shareToken', async () => {
 test('getRouteByShareToken retrieves the route and protects visitor privacy', async () => {
   const payload = {
     filename: 'ridge-trail.gpx',
+    shareToken: 'decaf000decaf000decaf000decaf000',
     fileSize: 2048,
     bbox: { minlat: 37.7, minlon: -122.4, maxlat: 37.8, maxlon: -122.3 },
     routeKm: 25.0,

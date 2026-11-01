@@ -40,13 +40,13 @@ const fs = require('fs');
 const net = require('net');
 const {
   initDatabase,
-  insertRoute,
   listRoutes,
   listRouteIds,
   countRoutes,
   getRouteById,
   getRouteByShareToken,
   deleteRouteById,
+  purgeExpiredRoutes,
   DB_PATH
 } = require('./db');
 // archiver 8 dropped the callable default export in favour of named classes,
@@ -68,6 +68,7 @@ const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
 const { OverpassCache, cacheKey } = require('./overpassCache');
 const { DEFAULT_USER_AGENT, parseFallbackUrls, queryUpstreams } = require('./overpassUpstream');
 const { enrichedGpxForRow } = require('./enrichedGpx');
+const { storeUpload, deleteSharedRoute } = require('./routeStorage');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -260,53 +261,59 @@ function requireBasicAuth(req, res, next) {
   return res.status(401).send('Invalid credentials');
 }
 
-// Uploads are anonymous by design, so the only thing standing between the
-// volume and a filler is the rate limit. Stop accepting new routes before the
-// disk fills, which would take the whole app down rather than just this
-// endpoint. Checked against the live file size, cached briefly.
+// Uploads are anonymous by design, so these are what stand between the volume and
+// a filler (see server/routeStorage.js). MAX_ROUTE_DB_BYTES stays below the disk,
+// which filling would take the whole app down rather than just this endpoint.
 const MAX_ROUTE_DB_BYTES = positiveInteger(
   process.env.MAX_ROUTE_DB_BYTES,
   512 * 1024 * 1024,
   1024 * 1024,
   64 * 1024 * 1024 * 1024
 );
-let dbSizeCache = { bytes: 0, checkedAt: 0 };
-const DB_SIZE_TTL_MS = 30 * 1000;
+const UPLOAD_DAILY_BYTES = positiveInteger(
+  process.env.UPLOAD_DAILY_BYTES,
+  128 * 1024 * 1024,
+  1024 * 1024,
+  64 * 1024 * 1024 * 1024
+);
+const ROUTE_RETENTION_DAYS = positiveInteger(process.env.ROUTE_RETENTION_DAYS, 90, 1, 36500);
+const PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-async function isRouteStorageFull() {
-  const now = Date.now();
-  if (now - dbSizeCache.checkedAt > DB_SIZE_TTL_MS) {
-    try {
-      const stat = await fs.promises.stat(DB_PATH);
-      dbSizeCache = { bytes: stat.size, checkedAt: now };
-    } catch (e) {
-      // A missing file means nothing has been written yet.
-      dbSizeCache = { bytes: 0, checkedAt: now };
-    }
+async function purgeExpired() {
+  try {
+    const deleted = await purgeExpiredRoutes();
+    if (deleted) console.log('[routes] deleted expired routes', { deleted });
+  } catch (e) {
+    console.error('[routes] purge failed', e);
   }
-  return dbSizeCache.bytes >= MAX_ROUTE_DB_BYTES;
 }
 
-// API: Save a route (raw GPX plus summary)
-// body: { filename, gpxText, bbox, routeKm, waypointsCount }
+// API: Save a route (raw GPX plus summary), or with share: true get a link to it
+// body: { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, share }
 app.post('/api/routes', uploadLimiter, requireSameOriginStrict, async (req, res) => {
   try {
-    if (await isRouteStorageFull()) {
-      return res.status(507).json({ error: 'Route storage is full' });
-    }
     const validation = validateRoutePayload(req.body);
     if (!validation.ok) {
       return res.status(400).json({ error: validation.error });
     }
-    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints } = validation.value;
-    const fileSize = Buffer.byteLength(gpxText, 'utf8');
+    const { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, share } = validation.value;
     // Store only the coarse network, never the full address: a GPX track plus a
     // full IP identifies a person, and this endpoint takes no authentication.
     const clientIp = anonymizeIp(req.ip || req.socket?.remoteAddress || null);
-    const result = await insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints });
-    // One line per upload rather than three; the details are in the row.
-    console.log('[POST /api/routes] saved', { id: result.id, shareToken: result.shareToken, filename, fileSize, routeKm, waypointsCount });
-    return res.json({ ok: true, id: result.id, shareToken: result.shareToken });
+    const result = await storeUpload(
+      { filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, clientIp },
+      { share, retentionDays: ROUTE_RETENTION_DAYS, dailyBudgetBytes: UPLOAD_DAILY_BYTES, maxBytes: MAX_ROUTE_DB_BYTES }
+    );
+    if (result.outcome === 'over_budget') {
+      return res.status(429).json({ error: 'The server has taken in as many routes as it can today. Try again tomorrow.' });
+    }
+    if (result.outcome === 'full') {
+      return res.status(507).json({ error: 'Route storage is full' });
+    }
+    // One line per upload rather than three; the details are in the row. Never
+    // the tokens: a share link in the logs is a way in to someone's route.
+    console.log('[POST /api/routes] saved', { id: result.id, shared: !!result.shareToken, filename, routeKm, waypointsCount });
+    return res.json({ ok: true, id: result.id, shareToken: result.shareToken, deleteToken: result.deleteToken });
   } catch (e) {
     console.error('[POST /api/routes] Error:', e);
     return res.status(500).json({ error: 'Failed to save route' });
@@ -337,6 +344,23 @@ app.get('/api/shared-routes/:token', proxyLimiter, async (req, res) => {
   } catch (e) {
     console.error('[GET /api/shared-routes/:token] Error:', e);
     return res.status(500).json({ error: 'Failed to retrieve shared route' });
+  }
+});
+
+// API: Delete a shared route, for whoever holds the token it was created with.
+app.delete('/api/shared-routes/:token', uploadLimiter, requireSameOriginStrict, async (req, res) => {
+  try {
+    const token = parseShareToken(req.params.token);
+    if (!token) {
+      return res.status(400).json({ error: 'Invalid share token' });
+    }
+    const outcome = await deleteSharedRoute(token, req.get('x-delete-token'));
+    if (outcome === 'missing') return res.status(404).json({ error: 'Route not found' });
+    if (outcome === 'forbidden') return res.status(403).json({ error: 'That is not the delete token for this route' });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/shared-routes/:token] Error:', e);
+    return res.status(500).json({ error: 'Failed to delete shared route' });
   }
 });
 
@@ -857,6 +881,9 @@ validateStartupConfiguration();
 
 initDatabase()
   .then(() => {
+    // At startup too: the machine stops when idle, and may never see the interval.
+    purgeExpired();
+    setInterval(purgeExpired, PURGE_INTERVAL_MS).unref();
     app.listen(PORT, () => {
       console.log(`🍎 Local proxy listening on http://localhost:${PORT}`);
       console.log(`🍯 Overpass upstream: ${OVERPASS_UPSTREAMS.join(' → ')}`);

@@ -34,6 +34,14 @@ test('validateRoutePayload accepts a bounded GPX payload', () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.value.filename, 'route.gpx');
+  assert.equal(result.value.share, false);
+});
+
+test('validateRoutePayload only treats a literal true as a request to share', () => {
+  const payload = { filename: 'route.gpx', gpxText: '<gpx></gpx>' };
+  assert.equal(validateRoutePayload({ ...payload, share: true }).value.share, true);
+  assert.equal(validateRoutePayload({ ...payload, share: 'true' }).value.share, false);
+  assert.equal(validateRoutePayload({ ...payload, share: 1 }).value.share, false);
 });
 
 test('validateRoutePayload accepts GPX content up to 8 MB', () => {

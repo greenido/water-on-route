@@ -87,7 +87,8 @@ function validateRoutePayload(payload) {
       routeKm: routeKm ?? null,
       waypointsCount: waypointsCount ?? null,
       waterPoints: waterPoints || null,
-      enrichedGpxText: enrichedGpxText || null
+      enrichedGpxText: enrichedGpxText || null,
+      share: payload.share === true
     }
   };
 }
