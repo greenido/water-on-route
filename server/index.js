@@ -65,8 +65,8 @@ const {
   validateBbox
 } = require('./security');
 const { QUERY_KINDS, buildQueryForKind } = require('./overpassQuery');
-const { OverpassCache, cacheKey } = require('./overpassCache');
-const { DEFAULT_USER_AGENT, parseFallbackUrls, queryUpstreams } = require('./overpassUpstream');
+const { OverpassCache, OverpassDiskCache, cacheKey, isPersistedKind } = require('./overpassCache');
+const { DEFAULT_USER_AGENT, RESPONSE_TOO_LARGE, parseFallbackUrls, queryUpstreams } = require('./overpassUpstream');
 const { enrichedGpxForRow } = require('./enrichedGpx');
 
 const app = express();
@@ -153,7 +153,9 @@ const uploadLimiter = rateLimit({
 });
 const proxyLimiter = rateLimit({
   ...limiterDefaults,
-  limit: positiveInteger(process.env.PROXY_RATE_LIMIT, 120, 1, 10000),
+  // A route is a request per grid square per search, so a long one with water,
+  // refill and coffee can use a hundred or more, cached or not.
+  limit: positiveInteger(process.env.PROXY_RATE_LIMIT, 300, 1, 10000),
   message: 'Proxy rate limit exceeded'
 });
 const tileLimiter = rateLimit({
@@ -713,7 +715,7 @@ app.get('/admin', adminLimiter, requireBasicAuth, (req, res) => {
 async function readUpstreamBody(response, maxBytes) {
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error('Upstream response exceeds size limit');
+    throw Object.assign(new Error('Upstream response exceeds size limit'), { code: RESPONSE_TOO_LARGE });
   }
 
   const reader = response.body.getReader();
@@ -726,7 +728,7 @@ async function readUpstreamBody(response, maxBytes) {
       total += value.byteLength;
       if (total > maxBytes) {
         await reader.cancel();
-        throw new Error('Upstream response exceeds size limit');
+        throw Object.assign(new Error('Upstream response exceeds size limit'), { code: RESPONSE_TOO_LARGE });
       }
       chunks.push(Buffer.from(value));
     }
@@ -741,6 +743,16 @@ const overpassCache = new OverpassCache({
   maxBytes: positiveInteger(process.env.OVERPASS_CACHE_MAX_BYTES, 64 * 1024 * 1024, 0, 2 * 1024 * 1024 * 1024),
   ttlMs: positiveInteger(process.env.OVERPASS_CACHE_TTL_MS, 6 * 60 * 60 * 1000, 0, 7 * 24 * 60 * 60 * 1000)
 });
+
+// The machine stops when idle, which empties the memory cache above, so route
+// searches are also kept on the volume. In a separate file so it never counts
+// against MAX_ROUTE_DB_BYTES, and so it can simply be deleted.
+const overpassDiskCache = new OverpassDiskCache({
+  path: process.env.OVERPASS_CACHE_DB_PATH || path.join(path.dirname(DB_PATH), 'overpass-cache.sqlite3'),
+  maxBytes: positiveInteger(process.env.OVERPASS_DISK_CACHE_MAX_BYTES, 128 * 1024 * 1024, 0, 16 * 1024 * 1024 * 1024),
+  ttlMs: positiveInteger(process.env.OVERPASS_DISK_CACHE_TTL_MS, 3 * 24 * 60 * 60 * 1000, 0, 30 * 24 * 60 * 60 * 1000)
+});
+overpassDiskCache.open();
 
 // Overpass proxy. Takes { bbox, kind } and builds the query here; it never
 // forwards client-supplied query text (see server/overpassQuery.js).
@@ -763,6 +775,13 @@ app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res
     res.setHeader('X-Cache', 'HIT');
     return res.send(cached.body);
   }
+  const stored = isPersistedKind(kind) ? await overpassDiskCache.get(key) : null;
+  if (stored) {
+    overpassCache.set(key, stored.body, stored.contentType);
+    res.setHeader('Content-Type', stored.contentType);
+    res.setHeader('X-Cache', 'DISK');
+    return res.send(stored.body);
+  }
 
   try {
     const upstream = await queryUpstreams({
@@ -778,13 +797,17 @@ app.post('/api/overpass', proxyLimiter, requireSameOriginStrict, async (req, res
     const ct = upstream.contentType || 'text/xml; charset=utf-8';
     // Only successful bodies are worth keeping; an error page cached for six
     // hours would be far worse than re-asking.
-    if (upstream.ok) overpassCache.set(key, upstream.body, ct);
+    if (upstream.ok) {
+      overpassCache.set(key, upstream.body, ct);
+      if (isPersistedKind(kind)) overpassDiskCache.set(key, upstream.body, ct);
+    }
     res.status(upstream.status);
     res.setHeader('Content-Type', ct);
     res.setHeader('X-Cache', 'MISS');
     return res.send(upstream.body);
   } catch (err) {
-    const status = err.name === 'AbortError' ? 504 : 502;
+    // A 413 tells the client to ask for a smaller box; a 502 would not.
+    const status = err.code === RESPONSE_TOO_LARGE ? 413 : err.name === 'AbortError' ? 504 : 502;
     console.error('[POST /api/overpass] error', err);
     return res.status(status).send('Proxy error');
   }

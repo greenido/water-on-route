@@ -12,6 +12,12 @@
  * and comes back as is: asking a mirror the same bad question gets the same
  * reply, just later.
  *
+ * A 200 is not always an answer. When a query runs out of time or memory after
+ * Overpass has started replying, the status has already gone out, so it reports
+ * the failure as a <remark> in the body, with little or no data around it.
+ * Those count as busy too: passed along, they read as "no water here" and would
+ * be cached as if that were true.
+ *
  * Requests carry an identifying User-Agent. The Overpass usage policy asks for
  * one, and overpass-api.de answers some generic agents (`node`, `curl/…`)
  * with 406.
@@ -23,6 +29,22 @@ const BUSY_STATUSES = Object.freeze(new Set([429, 502, 503, 504]));
 const DEFAULT_FALLBACK_URLS = Object.freeze(['https://maps.mail.ru/osm/tools/overpass/api/interpreter']);
 
 const DEFAULT_USER_AGENT = 'water-on-route/1.0 (+https://github.com/greenido/water-on-route)';
+
+/** err.code from a body reader: this answer is too big, wherever it comes from. */
+const RESPONSE_TOO_LARGE = 'RESPONSE_TOO_LARGE';
+
+/**
+ * Why a 200 from Overpass is not a usable answer, or null when it is.
+ * The remark comes after any data, right before the closing tag.
+ *
+ * @param {Buffer} body
+ * @returns {string|null}
+ */
+function overpassBodyFailure(body) {
+  if (!body.subarray(0, 1024).toString('utf8').includes('<osm')) return 'sent something other than OSM data';
+  if (/<remark>\s*runtime error/i.test(body.subarray(-4096).toString('utf8'))) return 'reported a runtime error';
+  return null;
+}
 
 function isHttpUrl(value) {
   try {
@@ -73,7 +95,9 @@ const hostOf = (url) => {
  * @param {(message: string) => void} [options.log]
  * @returns {Promise<{url: string, status: number, ok: boolean, body: Buffer, contentType: string|null}>}
  *   the first non-busy answer, or the last busy one if every upstream was busy
- * @throws the last network error or timeout (name 'AbortError') when no upstream answered at all
+ * @throws the last network error or timeout (name 'AbortError') when no upstream
+ *   answered at all, or at once for a RESPONSE_TOO_LARGE from readBody: a mirror
+ *   holds the same data, so asking it would only download the same answer again
  */
 async function queryUpstreams({
   urls,
@@ -115,10 +139,19 @@ async function queryUpstreams({
         body: await readBody(response),
         contentType: response.headers.get('content-type')
       };
-      if (!BUSY_STATUSES.has(result.status)) return result;
-      lastBusy = result;
-      outcome = `answered ${result.status}`;
+      const failure = result.ok ? overpassBodyFailure(result.body) : null;
+      if (failure) {
+        // The proxy's clients treat a 504 as a reason to try a smaller box.
+        lastBusy = { ...result, status: 504, ok: false };
+        outcome = failure;
+      } else if (!BUSY_STATUSES.has(result.status)) {
+        return result;
+      } else {
+        lastBusy = result;
+        outcome = `answered ${result.status}`;
+      }
     } catch (err) {
+      if (err && err.code === RESPONSE_TOO_LARGE) throw err;
       lastError = err;
       outcome = err && err.name === 'AbortError' ? 'timed out' : `failed (${err && err.message})`;
     } finally {
@@ -135,6 +168,8 @@ module.exports = {
   BUSY_STATUSES,
   DEFAULT_FALLBACK_URLS,
   DEFAULT_USER_AGENT,
+  RESPONSE_TOO_LARGE,
+  overpassBodyFailure,
   parseFallbackUrls,
   queryUpstreams
 };

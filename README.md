@@ -17,7 +17,9 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 - Upload or drag-and-drop a `.gpx` or Garmin `.fit` file
 - Interactive map with your route, water markers, and optional coffee markers
 - Broader potable-water OSM coverage (fountains, water points, taps) plus coffee search ranked by distance and OSM signals
-- Adaptive Overpass querying with split-and-retry for large bounding boxes or rate limits (water and coffee)
+- Searches the grid squares the route passes through, not its whole bounding box, with split-and-retry
+  when a square is too big or the server is busy. If part of a route can't be checked it says so, keeps
+  the rest, and offers to try again
 - Refill stops: fuel stations, shops, campgrounds, public toilets and cemetery taps,
   graded by how sure you can be of getting water, for the rural routes where
   `amenity=drinking_water` is thin on the ground
@@ -84,15 +86,18 @@ Notes:
 
 - Frontend (`index.html`, `app.js`, `osmApi.mjs`)
   - Renders a Leaflet map and your GPX route
-  - Computes a bounding box for the route
+  - Works out which fixed grid squares (0.5°, about 50 km across) the route and the widest search
+    radius pass through, and asks for those. The same squares for everyone means overlapping routes
+    share the server's cache
   - Queries Overpass for potable water: `amenity=drinking_water`, `natural=spring`, `man_made=water_tap`, `amenity=water_point`, potable `amenity=fountain` / `man_made=water_well`, and `drinking_water=yes|compatible` (excludes `drinking_water=no`)
   - Optional coffee search: `amenity=cafe`, `shop=coffee`, restaurants with coffee-related cuisine; ranked by corridor distance plus OSM signals (name/brand, cuisine, hours, website)
   - Optional refill search: `amenity=fuel`, `shop=convenience|supermarket`, `amenity=toilets`,
     `tourism=camp_site|picnic_site|wilderness_hut|alpine_hut`, cemeteries and water points.
     Each is graded `certain` (tagged as drinking water), `likely` (staffed, ask inside) or
     `maybe`, and ranked by that grade before distance
-  - Adaptively splits the bbox and retries on 400/429/504 responses for both water and coffee; dedupes by OSM type+id
-  - Split quads are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
+  - Splits a square and retries on 400/413/429/504 responses, asks twice more on 502/503, and dedupes by OSM type+id.
+    A square that still fails leaves a visible warning rather than failing the whole search
+  - Squares are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
   - Near me: takes one position fix, sends a box around it (padded out to a ~500 m grid so
     riders close together share the server cache), and asks for the `nearby` kind, which is
@@ -183,7 +188,7 @@ If you leave variables unset, sane defaults will be used:
 - `TRUST_PROXY_HOPS`: trusted reverse-proxy hop count (Fly.io uses `1`);
   leave unset when clients connect directly
 - `UPLOAD_RATE_LIMIT`: route uploads per client per 15 minutes (default `20`)
-- `PROXY_RATE_LIMIT`: Overpass requests per client per 15 minutes (default `120`)
+- `PROXY_RATE_LIMIT`: Overpass requests per client per 15 minutes (default `300`)
 - `TILE_RATE_LIMIT`: tile requests per client per 15 minutes (default `600`)
 - `ADMIN_RATE_LIMIT`: admin requests per client per 15 minutes (default `60`)
 - `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
@@ -191,6 +196,10 @@ If you leave variables unset, sane defaults will be used:
 - `MAX_ROUTE_DB_BYTES`: refuse new uploads past this DB size (default `536870912`)
 - `OVERPASS_CACHE_TTL_MS`: how long a cached Overpass response stays fresh (default 6 h)
 - `OVERPASS_CACHE_MAX_ENTRIES` / `OVERPASS_CACHE_MAX_BYTES`: cache bounds (default `200` / 64 MB)
+- `OVERPASS_CACHE_DB_PATH`: on-disk cache file for route searches (default `overpass-cache.sqlite3`
+  next to the routes database). Safe to delete at any time
+- `OVERPASS_DISK_CACHE_MAX_BYTES` / `OVERPASS_DISK_CACHE_TTL_MS`: its bounds (default 128 MB / 3 days);
+  `0` bytes turns it off
 - `DEBUG_DB`: per-operation SQLite tracing (default `false`)
 
 Copy `.env.example` to `.env` for the complete configuration template. Never
@@ -238,7 +247,11 @@ The Express server exposes a few endpoints:
     query text is never forwarded, so the endpoint cannot be used as an open relay
   - Same-origin requests only; a bbox spanning more than 12° on a side is rejected
     with `400`, which the client treats as a signal to split and retry
-  - Successful responses are cached in memory (LRU, bounded by count, bytes and age); the reply carries `X-Cache: HIT` or `MISS`
+  - Successful responses are cached in memory (LRU, bounded by count, bytes and age). Route kinds
+    are also cached on disk, so they survive a restart; `nearby` never is. The reply carries `X-Cache: HIT`,
+    `DISK` or `MISS`
+  - A 200 whose body is an Overpass runtime error, or is not OSM data at all, is treated as a busy upstream and
+    never cached. An answer over the size limit comes back as `413`, which the client treats as a signal to split
   - Returns the Overpass response as text, passing through the content-type when available
 - `GET /tiles/{z}/{x}/{y}.png` – tile proxy
   - Fetches the tile from `TILE_URL_TEMPLATE` and forwards it with caching headers
@@ -284,6 +297,9 @@ The Express server exposes a few endpoints:
   IPv4 keeps the `/24`, IPv6 keeps the `/48`. Full addresses are never persisted.
 - The city lookup that sends addresses to `ipapi.co` is opt-in via
   `ENABLE_GEOIP=true`. It is off by default.
+- A route search asks about fixed map squares about 50 km across, and the server keeps the answers
+  on disk for a few days. Nothing ties a square to a person or a route, and turning off "Save my
+  route" does not change this.
 
 ---
 
