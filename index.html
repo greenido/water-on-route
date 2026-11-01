@@ -102,14 +102,14 @@
 
       <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-2">
         <label for="saveRouteToggle" class="flex items-start gap-2 cursor-pointer">
-          <input type="checkbox" id="saveRouteToggle" class="mt-0.5 accent-sky-400" checked>
+          <input type="checkbox" id="saveRouteToggle" class="mt-0.5 accent-sky-400">
           <span class="text-sm text-slate-300">Save my route on the server</span>
         </label>
         <p class="text-xs text-slate-500">
-          When on, your uploaded route and the water points found for it are stored so
-          Ido can see how the app is used. A coarse network address (last part removed)
-          is kept alongside it. Turn this off to keep everything in your browser — the
-          map and the enriched GPX download work either way.
+          Off by default: your route stays in your browser, and the map and the enriched
+          GPX download work either way. When on, your uploaded route and the water points
+          found for it are stored for 90 days so Ido can see how the app is used, with a
+          coarse network address (last part removed) alongside it.
         </p>
       </div>
 
@@ -122,7 +122,10 @@
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92c0-1.61-1.31-2.92-2.92-2.92z"/></svg>
           <span>Share route</span>
         </button>
+        <!-- No inline-flex here: a display class would beat the hidden attribute. -->
+        <button id="unshareBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 text-slate-200 font-medium hover:bg-slate-700 transition" hidden>Delete share link</button>
       </div>
+      <p class="text-xs text-slate-500">Sharing stores this route on the server until the link is deleted, which you can do from this device.</p>
 
       <div id="status" class="text-sm text-slate-400 min-h-[18px]" aria-live="polite"></div>
       <div id="error" class="text-sm text-red-400" role="alert" hidden></div>
@@ -250,11 +253,16 @@
         <div class="pt-2">
           <h3 class="text-slate-200 font-medium mb-2">What gets stored</h3>
           <p class="text-slate-400">
-            While “Save my route on the server” is ticked, your uploaded route, the water
-            points found for it, and a coarse network address (the last part of your IP is
-            removed) are saved so Ido can see how the app is used. Untick it and nothing
-            leaves your browser apart from the anonymous OpenStreetMap queries needed to
-            find water. Your choice is remembered on this device.
+            “Save my route on the server” is off unless you tick it. While it is ticked, your
+            uploaded route, the water points found for it, and a coarse network address (the
+            last part of your IP is removed) are kept for 90 days so Ido can see how the app
+            is used. Unticked, nothing leaves your browser apart from the anonymous
+            OpenStreetMap queries needed to find water. Your choice is remembered on this device.
+          </p>
+          <p class="text-slate-400 mt-2">
+            “Share route” always stores the route, because the link needs something to open.
+            It stays until the link is deleted: “Delete share link” appears on the device that
+            shared it, whenever that route is open there.
           </p>
           <p class="text-slate-400 mt-2">
             "Find water near me" uses your location only in your browser. The server gets a

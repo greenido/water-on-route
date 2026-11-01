@@ -31,7 +31,7 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
 - One-click download of an enriched `.gpx` whose waypoints are named `km 47.0 — Fountain`
 - Local proxy for Overpass and tiles to avoid CORS and respect usage policies
 - Optional Docker stack to run Overpass and a local raster tile server
-- Save uploaded routes to SQLite and review them in an admin table
+- Optionally save uploaded routes to SQLite and review them in an admin table
 
 ---
 
@@ -195,7 +195,10 @@ If you leave variables unset, sane defaults will be used:
 - `ADMIN_RATE_LIMIT`: admin requests per client per 15 minutes (default `60`)
 - `ENABLE_DB_DOWNLOAD`: opt in to raw SQLite download (default `false`)
 - `ENABLE_GEOIP`: opt in to third-party city lookup for stored IPs (default `false`)
-- `MAX_ROUTE_DB_BYTES`: refuse new uploads past this DB size (default `536870912`)
+- `MAX_ROUTE_DB_BYTES`: cap on the routes database's live data (default `536870912`). At the cap the oldest
+  routes that were only saved make way; uploads stop with `507` if nothing is left that can go
+- `UPLOAD_DAILY_BYTES`: new route data accepted per rolling 24 hours, across all clients (default 128 MB)
+- `ROUTE_RETENTION_DAYS`: how long a route that was only saved stays (default `90`)
 - `OVERPASS_CACHE_TTL_MS`: how long a cached Overpass response stays fresh (default 6 h)
 - `OVERPASS_CACHE_MAX_ENTRIES` / `OVERPASS_CACHE_MAX_BYTES`: cache bounds (default `200` / 64 MB)
 - `OVERPASS_CACHE_DB_PATH`: on-disk cache file for route searches (default `overpass-cache.sqlite3`
@@ -261,12 +264,17 @@ The Express server exposes a few endpoints:
 ### Routes persistence API
 
 - `POST /api/routes` – Save an uploaded route
-  - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount, waterPoints }`
+  - Body (JSON): `{ filename, gpxText, bbox, routeKm, waypointsCount, waterPoints, share }`
+  - Uploading a file the server already holds adds nothing. With `share: true` the reply also carries
+    `shareToken` and `deleteToken`; without it, the route has no link and expires
   - The enriched GPX is not uploaded or stored: it is rebuilt from the original
     plus the water points whenever it is downloaded
   - Same-origin requests only; GPX content and metadata are validated
   - Original GPX is limited to 8 MB and enriched GPX to 12 MB
-  - Returns: `{ ok: true, id }`
+  - Returns: `{ ok: true, id }`, `429` past the daily budget, or `507` when storage is full
+- `GET /api/shared-routes/:token` – Open a shared route
+- `DELETE /api/shared-routes/:token` – Delete a shared route
+  - Needs the `X-Delete-Token` header holding the `deleteToken` it was created with
 - `GET /api/routes` – List saved routes (protected)
   - Basic Auth required (see below)
   - Returns: `{ ok: true, routes: [...] }`
@@ -280,8 +288,9 @@ The Express server exposes a few endpoints:
   kinds; arbitrary query text is never proxied.
 - State-changing requests must carry a matching `Origin` header, so they cannot be
   replayed by a plain HTTP client.
-- Route uploads stop with `507` once the database reaches `MAX_ROUTE_DB_BYTES`,
-  so an anonymous endpoint cannot fill the volume and take the app down.
+- Uploads are anonymous and the `Origin` check only stops browsers, so storage has its own limits: a daily
+  budget across all clients, and a cap that first drops the oldest routes nobody shared and only then
+  answers `507`. An anonymous endpoint cannot fill the volume and take the app down.
 - Admin credentials use timing-safe comparisons and are mandatory in production.
 - Raw database download is disabled unless `ENABLE_DB_DOWNLOAD=true`.
 - Upstream response sizes and tile coordinate ranges are bounded.
@@ -289,9 +298,13 @@ The Express server exposes a few endpoints:
 
 ### Privacy
 
-- Saving a route is disclosed in the sidebar and can be switched off; the choice
-  is remembered per device. With it off, nothing but anonymous OpenStreetMap
+- Saving a route is off unless the rider ticks it in the sidebar; the choice is
+  remembered per device. With it off, nothing but anonymous OpenStreetMap
   queries leaves the browser, and the map and enriched download still work.
+- Saved routes are deleted after `ROUTE_RETENTION_DAYS`. Routes stored before this
+  policy existed have no expiry date and are kept until an admin removes them.
+- Sharing stores the route until the link is deleted, by the device that created it
+  or by an admin. Links created before delete tokens existed can only be removed by an admin.
 - "Find water near me" uses your location only in the browser. The server sees a box a few
   kilometres across, rounded to a ~500 m grid, and keeps OpenStreetMap's answer for that box
   in its in-memory cache. The box is never written to the database or tied to a route.

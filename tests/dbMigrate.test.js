@@ -102,6 +102,17 @@ test('migrateSchema adds share_token to a non-empty legacy routes table', async 
   }
 });
 
+test('migrating leaves existing rows without an expiry date', async () => {
+  const database = await openDb(tempDbPath);
+  try {
+    const [legacy] = await allSql(database, 'SELECT expires_at, content_hash FROM routes WHERE id = 1');
+    assert.equal(legacy.expires_at, null);
+    assert.equal(legacy.content_hash, null);
+  } finally {
+    await closeDb(database);
+  }
+});
+
 test('insertRoute works after migrating a populated legacy database', async () => {
   const saved = await insertRoute({
     filename: 'new-after-migrate.gpx',

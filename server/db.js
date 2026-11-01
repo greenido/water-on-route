@@ -11,11 +11,11 @@
  * - NODE_ENV: production/development toggle
  * - FLY_APP_NAME / FLY_MACHINE: production detection on Fly.io
  *
- * Exports: DB_PATH, initDatabase, insertRoute, listRoutes, getRouteById
+ * Exports: DB_PATH, initDatabase, insertRoute, listRoutes, getRouteById, and the
+ * storage helpers behind server/routeStorage.js
  */
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
 const { clampListLimit, clampListOffset } = require('./pagination');
 
@@ -145,6 +145,17 @@ function migrateSchema() {
       // reproduces the archived file, so the download path can rebuild rows
       // whose points predate the _distanceM annotation.
       if (!cols.has('enriched_regenerable')) migrations.push(`ALTER TABLE routes ADD COLUMN enriched_regenerable INTEGER NOT NULL DEFAULT 0`);
+      // Hash of gpx_text, so uploading the same file again adds nothing. Rows
+      // from before this column have none and simply never match.
+      if (!cols.has('content_hash')) migrations.push(`ALTER TABLE routes ADD COLUMN content_hash TEXT`);
+      // Set on routes that are only saved. Null means keep: shared routes, and
+      // every row from before expiry existed, which were stored under no such
+      // promise and may be the only record of how the app was used.
+      if (!cols.has('expires_at')) migrations.push(`ALTER TABLE routes ADD COLUMN expires_at DATETIME`);
+      // Only the hash: a leaked database must not let anyone delete a link.
+      if (!cols.has('delete_token_hash')) migrations.push(`ALTER TABLE routes ADD COLUMN delete_token_hash TEXT`);
+      migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_content_hash ON routes (content_hash)`);
+      migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_expires_at ON routes (expires_at)`);
       // The listing always sorts by uploaded_at; without this every page is a
       // full scan plus a sort of the whole table.
       migrations.push(`CREATE INDEX IF NOT EXISTS idx_routes_uploaded_at ON routes (uploaded_at DESC, id DESC)`);
@@ -171,25 +182,119 @@ function migrateSchema() {
 // enriched_gpx_text is intentionally not written: it is derivable from
 // gpx_text plus water_points_json and is rebuilt on download. The column stays
 // so existing rows keep serving their stored copy until reclaimed.
-function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, shareToken }) {
+//
+// A share_token is only set on routes someone asked to share, and those never
+// expire. Without one, a positive retentionDays dates the row's expiry.
+function insertRoute({ filename, fileSize, bbox, routeKm, waypointsCount, gpxText, clientIp, waterPoints, shareToken, deleteTokenHash, contentHash, retentionDays }) {
   const startTime = Date.now();
   debugLog('[db.insertRoute] inserting', { filename, fileSize, routeKm, waypointsCount, hasGpx: !!gpxText });
   return new Promise((resolve, reject) => {
-    // Hex, not base64url: Slack/markdown treat `_` as emphasis and split the
-    // URL, so a recipient opened ?route=ab instead of ?route=ab_cd… (HTTP 400).
-    const token = shareToken || crypto.randomBytes(16).toString('hex');
-    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, share_token)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const expiry = !shareToken && retentionDays ? `${Number(retentionDays)} days` : null;
+    const stmt = `INSERT INTO routes (filename, file_size, bbox, route_km, waypoints_count, gpx_text, client_ip, water_points_json, share_token, delete_token_hash, content_hash, expires_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)`;
     const waterJson = waterPoints ? JSON.stringify(waterPoints) : null;
-    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson, token], function(err) {
+    db.run(stmt, [filename || null, fileSize || null, JSON.stringify(bbox || null), routeKm || null, waypointsCount || null, gpxText || null, clientIp || null, waterJson, shareToken || null, deleteTokenHash || null, contentHash || null, expiry, expiry], function(err) {
       if (err) {
         const elapsedMs = Date.now() - startTime;
         console.error('[db.insertRoute] failed', { elapsedMs, error: err });
         return reject(err);
       }
       const elapsedMs = Date.now() - startTime;
-      debugLog('[db.insertRoute] success', { id: this.lastID, shareToken: token, elapsedMs });
-      resolve({ id: this.lastID, shareToken: token });
+      debugLog('[db.insertRoute] success', { id: this.lastID, elapsedMs });
+      resolve({ id: this.lastID, shareToken: shareToken || null });
+    });
+  });
+}
+
+/**
+ * A row holding this exact file, oldest first.
+ * @param {string} contentHash
+ * @param {{unsharedOnly?: boolean}} [options] skip rows that already have a link
+ * @returns {Promise<{id: number}|null>}
+ */
+function findRouteByContentHash(contentHash, { unsharedOnly = false } = {}) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT id FROM routes WHERE content_hash = ? ${unsharedOnly ? 'AND share_token IS NULL' : ''} ORDER BY id ASC LIMIT 1`,
+      [contentHash],
+      (err, row) => (err ? reject(err) : resolve(row || null))
+    );
+  });
+}
+
+/** Give a saved route a link. It stops expiring, and keeps the rider's latest water points. */
+function shareExistingRoute(id, { shareToken, deleteTokenHash, waterPoints, waypointsCount }) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE routes SET share_token = ?, delete_token_hash = ?, expires_at = NULL,
+         water_points_json = COALESCE(?, water_points_json), waypoints_count = COALESCE(?, waypoints_count)
+       WHERE id = ?`,
+      [shareToken, deleteTokenHash, waterPoints ? JSON.stringify(waterPoints) : null, waypointsCount ?? null, id],
+      (err) => (err ? reject(err) : resolve())
+    );
+  });
+}
+
+function getShareCredentials(shareToken) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT id, delete_token_hash FROM routes WHERE share_token = ?`,
+      [shareToken],
+      (err, row) => (err ? reject(err) : resolve(row ? { id: row.id, deleteTokenHash: row.delete_token_hash } : null))
+    );
+  });
+}
+
+/**
+ * Bytes of live data, not the size of the file. Deleted rows leave free pages
+ * that SQLite reuses but never hands back, so a file that once reached the cap
+ * would read as full forever however much was cleared out of it.
+ */
+function databaseUsedBytes() {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT (SELECT page_count FROM pragma_page_count()) - (SELECT freelist_count FROM pragma_freelist_count()) AS pages,
+              (SELECT page_size FROM pragma_page_size()) AS page_size`,
+      [],
+      (err, row) => (err ? reject(err) : resolve(row.pages * row.page_size))
+    );
+  });
+}
+
+/** Bytes taken in over the last 24 hours. From the rows, so a restart cannot reset it. */
+function uploadedBytesLastDay() {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT COALESCE(SUM(COALESCE(file_size, 0) + COALESCE(length(water_points_json), 0)), 0) AS total
+       FROM routes WHERE uploaded_at >= datetime('now', '-1 day')`,
+      [],
+      (err, row) => (err ? reject(err) : resolve(row.total))
+    );
+  });
+}
+
+/** @returns {Promise<number>} routes deleted, which is 0 once none are expiring */
+function deleteOldestExpiringRoutes(limit) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `DELETE FROM routes WHERE id IN (
+         SELECT id FROM routes WHERE expires_at IS NOT NULL ORDER BY uploaded_at ASC, id ASC LIMIT ?
+       )`,
+      [limit],
+      function(err) {
+        if (err) return reject(err);
+        resolve(this.changes);
+      }
+    );
+  });
+}
+
+/** @returns {Promise<number>} routes deleted */
+function purgeExpiredRoutes() {
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM routes WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')`, [], function(err) {
+      if (err) return reject(err);
+      resolve(this.changes);
     });
   });
 }
@@ -385,7 +490,14 @@ module.exports = {
   countRoutes,
   getRouteById,
   getRouteByShareToken,
-  deleteRouteById
+  deleteRouteById,
+  findRouteByContentHash,
+  shareExistingRoute,
+  getShareCredentials,
+  databaseUsedBytes,
+  uploadedBytesLastDay,
+  deleteOldestExpiringRoutes,
+  purgeExpiredRoutes
 };
 
 
