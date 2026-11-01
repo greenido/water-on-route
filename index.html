@@ -139,6 +139,10 @@
             <div id="summaryCount" class="text-slate-100 font-medium">—</div>
           </div>
         </div>
+        <div id="coverageWarning" class="rounded-md border border-amber-500/50 bg-amber-500/10 text-amber-200 px-3 py-2 text-sm space-y-2" role="status" hidden>
+          <p id="coverageText"></p>
+          <button type="button" id="coverageRetryBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">Try again</button>
+        </div>
         <div id="dryStretch" class="rounded-md border px-3 py-2 text-sm">
           <div class="text-xs uppercase tracking-wide opacity-70">Longest dry stretch</div>
           <div id="dryStretchValue" class="font-medium">—</div>
@@ -257,6 +261,11 @@
             box a few kilometres across, rounded to a ~500 m grid, and asks OpenStreetMap what is
             in it. It keeps the answer for that box for a few hours so the next rider nearby
             gets it faster, but nothing ties the box to you and it is never saved with a route.
+          </p>
+          <p class="text-slate-400 mt-2">
+            A route search asks OpenStreetMap about fixed map squares about 50 km across. The
+            server keeps those answers for a few days so the next rider through gets them
+            faster, with nothing tying a square to you or your route.
           </p>
         </div>
         <p class="text-slate-400">

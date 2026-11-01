@@ -570,6 +570,79 @@ export function bboxAroundPoint(lat, lon, radiusM, gridDeg = 0.005) {
 }
 
 /**
+ * Grid step for route searches, in degrees: about 55 km by 44 km at mid
+ * latitudes. Every uncached square is a request, and the public server can take
+ * 40 s or more to answer one however small it is, so this errs large: a dense
+ * city at 0.25 degrees came to about 500 KB, leaving plenty of room under the
+ * 8 MB response limit, and a square that does go over is split.
+ */
+export const ROUTE_TILE_DEG = 0.5;
+
+/**
+ * The fixed grid squares a route, plus paddingM either side of it, passes through.
+ *
+ * Querying these instead of the route's bounding box does three things. It skips
+ * the empty corners of a diagonal route. It fixes the box being exactly as wide
+ * as the track, which missed anything just past the route's outer edges and
+ * left a due-east route with a box of zero height. And because the squares are
+ * the same for everyone, riders on overlapping routes share cache entries.
+ *
+ * @param {object} geojson
+ * @param {number} [paddingM] how far off the route results are wanted
+ * @param {number} [gridDeg]
+ * @returns {Array<{minlat: number, minlon: number, maxlat: number, maxlon: number}>}
+ *   in the order the route first reaches them
+ */
+export function routeTiles(geojson, paddingM = 0, gridDeg = ROUTE_TILE_DEG) {
+  const metresPerDegLat = EARTH_RADIUS_M * DEG_TO_RAD;
+  // Long segments are sampled this often, so a sparse track still covers every
+  // square it crosses. Samples are up to about 550 m apart, so each one is
+  // padded a little extra to cover the stretch either side of it.
+  const sampleDeg = 0.005;
+  const paddedM = paddingM + 300;
+  const cells = new Set();
+
+  const cover = (lon, lat) => {
+    const dLat = paddedM / metresPerDegLat;
+    const dLon = paddedM / (metresPerDegLat * Math.max(Math.cos(lat * DEG_TO_RAD), 0.01));
+    const fromRow = Math.floor((lat - dLat) / gridDeg);
+    const toRow = Math.floor((lat + dLat) / gridDeg);
+    const fromCol = Math.floor((lon - dLon) / gridDeg);
+    const toCol = Math.floor((lon + dLon) / gridDeg);
+    for (let row = fromRow; row <= toRow; row++) {
+      for (let col = fromCol; col <= toCol; col++) cells.add(`${row}:${col}`);
+    }
+  };
+
+  for (const line of extractRouteLineStrings(geojson)) {
+    cover(line[0][0], line[0][1]);
+    for (let i = 1; i < line.length; i++) {
+      const [lon0, lat0] = line[i - 1];
+      const [lon1, lat1] = line[i];
+      const steps = Math.ceil(Math.max(Math.abs(lon1 - lon0), Math.abs(lat1 - lat0)) / sampleDeg) || 1;
+      for (let s = 1; s <= steps; s++) {
+        cover(lon0 + ((lon1 - lon0) * s) / steps, lat0 + ((lat1 - lat0) * s) / steps);
+      }
+    }
+  }
+
+  const edge = (index, limit) => Math.min(limit, Math.max(-limit, Number((index * gridDeg).toFixed(6))));
+  const tiles = [];
+  for (const cell of cells) {
+    const [row, col] = cell.split(':').map(Number);
+    const tile = {
+      minlat: edge(row, 90),
+      minlon: edge(col, 180),
+      maxlat: edge(row + 1, 90),
+      maxlon: edge(col + 1, 180)
+    };
+    // A square entirely past a pole or the antimeridian clamps to nothing.
+    if (tile.minlat < tile.maxlat && tile.minlon < tile.maxlon) tiles.push(tile);
+  }
+  return tiles;
+}
+
+/**
  * Initial compass bearing from a to b, both [lon, lat].
  * @returns {number} degrees in [0, 360)
  */

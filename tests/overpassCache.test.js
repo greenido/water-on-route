@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { OverpassCache, cacheKey } = require('../server/overpassCache');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const { OverpassCache, OverpassDiskCache, cacheKey, isPersistedKind } = require('../server/overpassCache');
 
 const BBOX = { minlat: 37.7694, minlon: -122.4862, maxlat: 37.7714, maxlon: -122.4502 };
 const XML = Buffer.from('<osm></osm>');
@@ -106,4 +110,72 @@ test('clear empties the cache and resets the byte count', () => {
   cache.clear();
   assert.equal(cache.size, 0);
   assert.equal(cache.stats().bytes, 0);
+});
+
+function diskCachePath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'wor-overpass-')), 'cache.sqlite3');
+}
+
+test('the disk cache survives being reopened, as after the machine stops', async () => {
+  const file = diskCachePath();
+  const first = new OverpassDiskCache({ path: file, maxBytes: 1024 * 1024, ttlMs: 1000 });
+  await first.set('water:1', XML, 'text/xml');
+  await first.close();
+
+  const second = new OverpassDiskCache({ path: file, maxBytes: 1024 * 1024, ttlMs: 1000 });
+  const hit = await second.get('water:1');
+  assert.deepEqual(hit, { body: XML, contentType: 'text/xml' });
+  assert.equal(await second.get('water:2'), null);
+  await second.close();
+});
+
+test('the disk cache expires old answers', async () => {
+  let clock = 1000;
+  const cache = new OverpassDiskCache({ path: diskCachePath(), maxBytes: 1024, ttlMs: 100, now: () => clock });
+  await cache.set('k', XML, 'text/xml');
+  clock += 50;
+  assert.ok(await cache.get('k'));
+  clock += 100;
+  assert.equal(await cache.get('k'), null);
+  await cache.close();
+});
+
+test('the disk cache stays under its byte limit, dropping the least recently used', async () => {
+  let clock = 1;
+  const cache = new OverpassDiskCache({ path: diskCachePath(), maxBytes: 25, ttlMs: 1e9, now: () => clock++ });
+  const body = Buffer.alloc(10, 'x');
+  await cache.set('a', body, 'text/xml');
+  await cache.set('b', body, 'text/xml');
+  await cache.get('a');
+  await cache.set('c', body, 'text/xml');
+  assert.ok(await cache.get('a'), 'recently read, so it stays');
+  assert.equal(await cache.get('b'), null, 'least recently used goes first');
+  assert.ok(await cache.get('c'));
+  await cache.close();
+});
+
+test('the disk cache refuses a single answer bigger than its whole budget', async () => {
+  const cache = new OverpassDiskCache({ path: diskCachePath(), maxBytes: 5, ttlMs: 1000 });
+  await cache.set('k', Buffer.alloc(10), 'text/xml');
+  assert.equal(await cache.get('k'), null);
+  await cache.close();
+});
+
+test('a disk cache that cannot open is a miss, not an error', async () => {
+  const cache = new OverpassDiskCache({ path: '/nonexistent-dir/nope/cache.sqlite3', maxBytes: 1024, ttlMs: 1000 });
+  await cache.set('k', XML, 'text/xml');
+  assert.equal(await cache.get('k'), null);
+});
+
+test('with no byte budget the disk cache never creates a file', async () => {
+  const file = diskCachePath();
+  const cache = new OverpassDiskCache({ path: file, maxBytes: 0, ttlMs: 1000 });
+  await cache.set('k', XML, 'text/xml');
+  assert.equal(await cache.get('k'), null);
+  assert.equal(fs.existsSync(file), false);
+});
+
+test('near-me answers never go to disk, as the privacy notes promise', () => {
+  assert.equal(isPersistedKind('nearby'), false);
+  for (const kind of ['water', 'coffee', 'refill']) assert.equal(isPersistedKind(kind), true);
 });

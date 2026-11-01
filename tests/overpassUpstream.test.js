@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const {
   DEFAULT_FALLBACK_URLS,
   DEFAULT_USER_AGENT,
+  RESPONSE_TOO_LARGE,
+  overpassBodyFailure,
   parseFallbackUrls,
   queryUpstreams
 } = require('../server/overpassUpstream');
@@ -159,4 +161,54 @@ test('parseFallbackUrls keeps http(s) URLs in order and drops anything else', ()
     parseFallbackUrls(`${MIRROR}, ftp://nope.example.com, not a url,${SPARE} `),
     [MIRROR, SPARE]
   );
+});
+
+const REMARK = '<?xml version="1.0"?><osm version="0.6"><remark> runtime error: Query timed out in "query" at line 3 after 26 seconds. </remark></osm>';
+const fetchWithBodies = (bodies) => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return reply(200, bodies[url]);
+  };
+  return { fetchImpl, calls };
+};
+
+test('overpassBodyFailure spots a timeout reported inside a 200', () => {
+  assert.match(overpassBodyFailure(Buffer.from(REMARK)), /runtime error/);
+  assert.match(overpassBodyFailure(Buffer.from('<html>busy</html>')), /other than OSM/);
+  assert.equal(overpassBodyFailure(Buffer.from('<?xml version="1.0"?><osm version="0.6"><node id="1"/></osm>')), null);
+  // Other remarks are informational, not failures.
+  assert.equal(overpassBodyFailure(Buffer.from('<osm><remark>note</remark></osm>')), null);
+});
+
+test('overpassBodyFailure finds the remark after a large partial answer', () => {
+  const big = `<osm>${'<node id="1"/>'.repeat(100000)}<remark> runtime error: out of memory </remark></osm>`;
+  assert.match(overpassBodyFailure(Buffer.from(big)), /runtime error/);
+});
+
+test('a 200 reporting a runtime error moves on to the mirror', async () => {
+  const good = '<osm version="0.6"><node id="1"/></osm>';
+  const { fetchImpl, calls } = fetchWithBodies({ [PRIMARY]: REMARK, [MIRROR]: good });
+  const result = await run(fetchImpl);
+  assert.deepEqual(calls, [PRIMARY, MIRROR]);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.toString(), good);
+});
+
+test('when every upstream reports a runtime error the answer is a 504, not a 200', async () => {
+  // Regression: passed along as a 200, this read as "no water here" and was
+  // cached for hours.
+  const { fetchImpl } = fetchWithBodies({ [PRIMARY]: REMARK, [MIRROR]: REMARK });
+  const result = await run(fetchImpl);
+  assert.equal(result.status, 504);
+  assert.equal(result.ok, false);
+});
+
+test('an answer over the size limit is final: the mirror has the same data', async () => {
+  const { fetchImpl, calls } = fakeFetch({ [PRIMARY]: 200, [MIRROR]: 200 });
+  const readBody = async () => {
+    throw Object.assign(new Error('too big'), { code: RESPONSE_TOO_LARGE });
+  };
+  await assert.rejects(run(fetchImpl, { readBody }), { code: RESPONSE_TOO_LARGE });
+  assert.deepEqual(calls.map((c) => c.url), [PRIMARY]);
 });

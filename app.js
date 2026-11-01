@@ -25,9 +25,7 @@
  */
 
 import {
-  fetchOSMWaterPointsAdaptive,
-  fetchOSMCoffeePointsAdaptive,
-  fetchOSMRefillPointsAdaptive,
+  fetchRoutePoints,
   waterSubtypeLabel,
   rankCoffeePoints,
   rankRefillPoints,
@@ -44,6 +42,7 @@ import {
 import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
 import {
   computeBBoxFromGeoJSON,
+  routeTiles,
   computeRouteLengthKm,
   filterPointsNearRoute,
   buildRouteIndex,
@@ -320,12 +319,54 @@ const MSG_REFILL = 'Looking for places to refill: shops, fuel stations, campsite
 const MSG_COFFEE = 'Looking for coffee stops along your route …';
 
 /**
- * Status callback for the adaptive Overpass fetches. They report how many
- * boxes have come back but never a total, since they split as they go. The
- * first box is usually the whole route, so only a split is worth mentioning.
+ * Status callback for the Overpass fetches, which report how many boxes have
+ * come back. A single box is not worth mentioning.
  */
 function overpassProgress(base) {
   return (done) => setStatus(done > 1 ? `${base} ${done} map sections checked` : base);
+}
+
+// Search out to the widest radius on offer, so changing the radius later can
+// re-filter what is already here without asking again.
+const WIDEST_RADIUS_M = Math.max(2000, ...Array.from(radiusSelect?.options || [], (o) => Number(o.value) || 0));
+
+const COVERAGE_LABELS = { water: 'water', refill: 'refill stops', coffee: 'coffee' };
+// Kinds whose last search left holes, as { failedTiles, totalTiles }.
+const coverageGaps = {};
+
+/** Tell the rider which searches came back incomplete, and what that means. */
+function renderCoverageWarning() {
+  const el = document.getElementById('coverageWarning');
+  if (!el) return;
+  const kinds = Object.keys(coverageGaps);
+  el.hidden = kinds.length === 0;
+  if (!kinds.length) return;
+  const parts = kinds.map((kind) => `${COVERAGE_LABELS[kind]} (${coverageGaps[kind].failedTiles} of ${coverageGaps[kind].totalTiles} map sections)`);
+  document.getElementById('coverageText').textContent =
+    `OpenStreetMap's server could not check part of this route for ${parts.join(', ')}. ` +
+    'Stops there are missing, so the real dry stretch may be shorter than shown.';
+}
+
+function clearCoverageGaps() {
+  for (const kind of Object.keys(coverageGaps)) delete coverageGaps[kind];
+  renderCoverageWarning();
+}
+
+/**
+ * Search the grid squares around a route. Throws only when nothing at all came
+ * back; a partial answer is returned, and the hole shown to the rider.
+ */
+async function searchRoute(kind, route, message) {
+  const { points, failedTiles, totalTiles } = await fetchRoutePoints(
+    kind,
+    routeTiles(route, WIDEST_RADIUS_M),
+    overpassProgress(message),
+    { initialBackoffMs: 500, maxBackoffMs: 4000 }
+  );
+  if (failedTiles) coverageGaps[kind] = { failedTiles, totalTiles };
+  else delete coverageGaps[kind];
+  renderCoverageWarning();
+  return points;
 }
 
 // Seconds after which the overlay explains the wait. Public Overpass
@@ -1082,6 +1123,7 @@ function resetApp() {
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
     if (dropZone && dropZone.classList) dropZone.classList.remove('dragover');
+    clearCoverageGaps();
     setStatus('Load a GPX or FIT file to begin.');
     // Re-center view
     centerMapOnUser();
@@ -1263,14 +1305,10 @@ async function loadSharedRoute(token) {
     currentRouteIndex = buildRouteIndex(geojson);
     currentRouteKm = currentRouteIndex.totalM / 1000;
 
-    const bbox = data.bbox && typeof data.bbox === 'object' && Number.isFinite(data.bbox.minlat)
-      ? data.bbox
-      : computeBBoxFromGeoJSON(geojson);
-
     setStatus(MSG_WATER);
     let results = [];
     try {
-      results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(MSG_WATER), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      results = await searchRoute('water', geojson, MSG_WATER);
     } catch (fetchErr) {
       console.warn('[loadSharedRoute] Live OSM query failed, falling back to saved points', fetchErr);
       if (Array.isArray(data.waterPoints) && data.waterPoints.length > 0) {
@@ -1312,12 +1350,16 @@ async function handleRouteFile(file) {
   // Project the route once; every later radius change and export reuses this.
   currentRouteIndex = buildRouteIndex(geojson);
   currentRouteKm = currentRouteIndex.totalM / 1000;
-  setStatus('Computing bounding box …');
-  const bbox = computeBBoxFromGeoJSON(geojson);
+  clearCoverageGaps();
+  await findWaterOnRoute(geojson);
+}
+
+/** The water search for the loaded route, and everything drawn from it. */
+async function findWaterOnRoute(geojson) {
   showLoading(true);
   try {
     setStatus(MSG_WATER);
-    const results = await fetchOSMWaterPointsAdaptive(bbox, overpassProgress(MSG_WATER), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+    const results = await searchRoute('water', geojson, MSG_WATER);
     foundWaterPoints = results;
     // Ride order, not proximity order: this is the sequence you meet them in.
     const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
@@ -1329,7 +1371,9 @@ async function handleRouteFile(file) {
     downloadBtn.disabled = false;
     if (shareBtn) shareBtn.disabled = false;
     // Save once, after the route is on screen, and never block rendering on it.
-    saveRoute(near);
+    // Not while part of the search is missing: the stored points would be short,
+    // and "Try again" comes back through here.
+    if (!coverageGaps.water) saveRoute(near);
   } catch (e) {
     console.error(e);
     setError(e.message || String(e));
@@ -1429,10 +1473,9 @@ if (navRefillBtn) {
       setError('');
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
       const routeFC = currentRouteAsFeatureCollection();
-      const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus(MSG_REFILL);
       showLoading(true);
-      const results = await fetchOSMRefillPointsAdaptive(bbox, overpassProgress(MSG_REFILL), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await searchRoute('refill', routeFC, MSG_REFILL);
       foundRefillPoints = results || [];
       nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
       renderRefillMarkers(nearRefillPoints, true);
@@ -1455,10 +1498,9 @@ if (navCoffeeBtn) {
       setError('');
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
       const routeFC = currentRouteAsFeatureCollection();
-      const bbox = computeBBoxFromGeoJSON(routeFC);
       setStatus(MSG_COFFEE);
       showLoading(true);
-      const results = await fetchOSMCoffeePointsAdaptive(bbox, overpassProgress(MSG_COFFEE), { minSpan: 0.01, initialBackoffMs: 500, maxBackoffMs: 4000 });
+      const results = await searchRoute('coffee', routeFC, MSG_COFFEE);
       foundCoffeePoints = results || [];
       const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
       renderCoffeeMarkers(near, true);
@@ -1470,6 +1512,16 @@ if (navCoffeeBtn) {
     } finally {
       showLoading(false);
     }
+  });
+}
+
+// Asking again costs little: squares that came back are answered from the cache.
+const coverageRetryBtn = document.getElementById('coverageRetryBtn');
+if (coverageRetryBtn) {
+  coverageRetryBtn.addEventListener('click', () => {
+    if (coverageGaps.water && currentRouteGeoJSON) findWaterOnRoute(currentRouteGeoJSON);
+    if (coverageGaps.refill && navRefillBtn) navRefillBtn.click();
+    if (coverageGaps.coffee && navCoffeeBtn) navCoffeeBtn.click();
   });
 }
 

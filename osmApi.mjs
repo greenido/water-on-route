@@ -328,6 +328,16 @@ export function dedupePointsByTypeId(points) {
   return out;
 }
 
+/**
+ * Answers that a smaller box can fix. A 400 is the proxy refusing a box above
+ * its span cap, and a 413 is a response over its size limit.
+ */
+const SPLITTABLE_STATUSES = new Set([400, 413, 429, 504]);
+
+/** "At capacity" from every upstream: a smaller box won't help, a moment might. */
+const RETRYABLE_STATUSES = new Set([502, 503]);
+const CAPACITY_RETRIES = 2;
+
 function getStatusFromError(err) {
   if (!err) return undefined;
   if (typeof err.status === 'number') return err.status;
@@ -337,11 +347,10 @@ function getStatusFromError(err) {
 }
 
 /**
- * Adaptive Overpass fetch, splitting the bbox on 400/429/504.
+ * Adaptive Overpass fetch, splitting the bbox on 400/413/429/504.
  *
- * A 400 is treated as splittable because the proxy rejects boxes above its
- * span cap with exactly that status, so an oversized route resolves by
- * subdividing rather than failing.
+ * Any box that still fails rejects the whole call. fetchRoutePoints is the
+ * variant that keeps what it got.
  *
  * @param {object} bbox
  * @param {function|null} onProgress
@@ -350,45 +359,115 @@ function getStatusFromError(err) {
  * @param {function} [options.parseXml] - XML → points (default: water parser)
  */
 export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}) {
+  const fetchBox = createBoxFetcher(onProgress, options);
+  return dedupePointsByTypeId(await fetchBox.fetch(bbox, 0));
+}
+
+/**
+ * The shared fetch-and-split loop.
+ *
+ * Given an onBoxFailed callback, a box that cannot be fetched is reported and
+ * yields nothing, so its neighbours still count, and a box refused for being at
+ * capacity is asked again first, a few seconds apart: the public server answers
+ * that within a second, so an immediate retry would just be refused too. Without
+ * one the error propagates.
+ */
+function createBoxFetcher(onProgress, options) {
   const minSpan = options.minSpan ?? 0.02;
   const timeoutMs = options.timeoutMs ?? OVERPASS_CLIENT_TIMEOUT_MS;
   const initialBackoffMs = options.initialBackoffMs ?? 500;
   const maxBackoffMs = options.maxBackoffMs ?? 4000;
+  const capacityBackoffMs = options.capacityBackoffMs ?? 3000;
   const fetchImpl = options.fetchImpl; // optional for tests
   const kind = options.kind ?? 'water';
   const parseXml = options.parseXml ?? parseOsmXmlForWater;
   // Overpass hands out a small number of slots per client; a couple of
   // requests in flight overlaps the latency without provoking 429s.
   const limit = createLimiter(options.concurrency ?? 2);
+  const backoffFor = (attempt) => Math.min(initialBackoffMs * Math.pow(2, attempt), maxBackoffMs);
 
-  let tilesFetched = 0;
-
-  async function fetchTile(tile, attempt) {
-    try {
-      // Only the network call is limited, so a parent awaiting its quads is
-      // never occupying a slot.
-      const xml = await limit(() => fetchOverpassXml(tile, kind, timeoutMs, fetchImpl));
-      tilesFetched++;
-      if (onProgress) onProgress(tilesFetched, undefined);
-      return parseXml(xml);
-    } catch (e) {
-      const status = getStatusFromError(e);
-      const span = bboxSpan(tile);
-      const canSplit = span.lat > minSpan || span.lon > minSpan;
-      if ((status === 400 || status === 429 || status === 504) && canSplit) {
-        const backoff = Math.min(initialBackoffMs * Math.pow(2, attempt), maxBackoffMs);
-        if (backoff > 0) await sleep(backoff);
-        const quads = splitBboxIntoQuads(tile);
-        const results = await Promise.all(quads.map((q) => fetchTile(q, attempt + 1)));
-        return results.flat();
+  const box = {
+    fetched: 0,
+    async fetch(tile, attempt, onBoxFailed, retries = 0) {
+      try {
+        // Only the network call is limited, so a parent awaiting its quads is
+        // never occupying a slot.
+        const xml = await limit(() => fetchOverpassXml(tile, kind, timeoutMs, fetchImpl));
+        box.fetched++;
+        if (onProgress) onProgress(box.fetched, undefined);
+        return parseXml(xml);
+      } catch (e) {
+        const status = getStatusFromError(e);
+        const span = bboxSpan(tile);
+        const canSplit = span.lat > minSpan || span.lon > minSpan;
+        if (SPLITTABLE_STATUSES.has(status) && canSplit) {
+          const backoff = backoffFor(attempt);
+          if (backoff > 0) await sleep(backoff);
+          const quads = splitBboxIntoQuads(tile);
+          const results = await Promise.all(quads.map((q) => box.fetch(q, attempt + 1, onBoxFailed)));
+          return results.flat();
+        }
+        if (!onBoxFailed) throw e;
+        if (RETRYABLE_STATUSES.has(status) && retries < CAPACITY_RETRIES) {
+          const backoff = capacityBackoffMs * Math.pow(3, retries);
+          if (backoff > 0) await sleep(backoff);
+          return box.fetch(tile, attempt, onBoxFailed, retries + 1);
+        }
+        onBoxFailed(e);
+        return [];
       }
-      throw e;
     }
-  }
-
-  const raw = await fetchTile(bbox, 0);
-  return dedupePointsByTypeId(raw);
+  };
+  return box;
 }
+
+/**
+ * Search a route's grid squares (see routeTiles in geo.mjs), keeping whatever
+ * came back.
+ *
+ * One busy square should not throw away the rest of a long route, and the
+ * caller needs to know about the hole: water missing from a square looks exactly
+ * like there being none.
+ *
+ * Squares are split at most twice. A route has many of them, so splitting each
+ * all the way down would turn one bad minute into hundreds of requests.
+ *
+ * @param {'water'|'coffee'|'refill'} kind
+ * @param {Array<object>} tiles
+ * @param {function|null} onProgress
+ * @param {object} [options]
+ * @returns {Promise<{points: Array<object>, failedTiles: number, totalTiles: number}>}
+ * @throws the last error when no square could be fetched at all
+ */
+export async function fetchRoutePoints(kind, tiles, onProgress, options = {}) {
+  let lastError = null;
+  const fetchBox = createBoxFetcher(onProgress, {
+    minSpan: 0.2,
+    ...options,
+    kind,
+    parseXml: ROUTE_PARSERS[kind]
+  });
+  let failedTiles = 0;
+  const results = await Promise.all(tiles.map(async (tile) => {
+    let failed = false;
+    const points = await fetchBox.fetch(tile, 0, (err) => {
+      failed = true;
+      lastError = err;
+    });
+    if (failed) failedTiles++;
+    return points;
+  }));
+  if (lastError && fetchBox.fetched === 0) throw lastError;
+  return { points: dedupePointsByTypeId(results.flat()), failedTiles, totalTiles: tiles.length };
+}
+
+const parseCoffeeXml = (xml) => parseOsmXmlGeneric(xml).filter((p) => isCoffeeTags(p.tags));
+const parseRefillXml = (xml) => parseOsmXmlGeneric(xml).filter((p) => isRefillTags(p.tags));
+const ROUTE_PARSERS = {
+  water: parseOsmXmlForWater,
+  coffee: parseCoffeeXml,
+  refill: parseRefillXml
+};
 
 export async function fetchOSMWaterPointsAdaptive(bbox, onProgress, options = {}) {
   return fetchOverpassPointsAdaptive(bbox, onProgress, {
@@ -402,7 +481,7 @@ export async function fetchOSMCoffeePointsAdaptive(bbox, onProgress, options = {
   return fetchOverpassPointsAdaptive(bbox, onProgress, {
     ...options,
     kind: 'coffee',
-    parseXml: (xml) => parseOsmXmlGeneric(xml).filter((p) => isCoffeeTags(p.tags)),
+    parseXml: parseCoffeeXml,
   });
 }
 
@@ -479,7 +558,7 @@ export async function fetchOSMRefillPointsAdaptive(bbox, onProgress, options = {
   return fetchOverpassPointsAdaptive(bbox, onProgress, {
     ...options,
     kind: 'refill',
-    parseXml: (xml) => parseOsmXmlGeneric(xml).filter((p) => isRefillTags(p.tags)),
+    parseXml: parseRefillXml,
   });
 }
 
