@@ -21,7 +21,10 @@ import {
   bboxAroundPoint,
   bearingDegrees,
   compassPoint,
-  formatMeters
+  formatMeters,
+  formatPassesKm,
+  passesOnRoute,
+  ridePasses
 } from '../geo.mjs';
 
 /** A due-east segment at the given latitude, long enough to project onto. */
@@ -466,4 +469,94 @@ test('formatMeters reads at walking scale', () => {
   assert.equal(formatMeters(5000), '5 km');
   assert.equal(formatMeters(15000), '15 km');
   assert.equal(formatMeters(Infinity), '—');
+});
+
+// Out along the equator, then back along the same line.
+function outAndBack(km) {
+  const metresPerDeg = haversineMeters([0, 0], [1, 0]);
+  const out = [];
+  for (let i = 0; i <= km; i++) out.push([(i * 1000) / metresPerDeg, 0]);
+  return {
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: [...out, ...out.slice(0, -1).reverse()] }
+  };
+}
+const onEquatorAtKm = (km) => ({ lat: 0, lon: (km * 1000) / haversineMeters([0, 0], [1, 0]) });
+
+test('passesOnRoute finds both passes of a stop on an out-and-back', () => {
+  const index = buildRouteIndex(outAndBack(50));
+  const { lat, lon } = onEquatorAtKm(10);
+  const passes = passesOnRoute(index, [lon, lat], 150);
+  assert.equal(passes.length, 2);
+  assert.ok(Math.abs(passes[0] - 10000) < 50, `first pass ${passes[0]}`);
+  assert.ok(Math.abs(passes[1] - 90000) < 50, `second pass ${passes[1]}`);
+});
+
+test('passesOnRoute reports one pass on a route that never comes back', () => {
+  const index = buildRouteIndex(northRoute(20));
+  const metresPerDeg = haversineMeters([-122, 37], [-122, 38]);
+  const passes = passesOnRoute(index, [-122, 37 + 5000 / metresPerDeg], 150);
+  assert.equal(passes.length, 1);
+  assert.ok(Math.abs(passes[0] - 5000) < 50);
+});
+
+test('a stop near the turnaround is one visit, not two', () => {
+  const index = buildRouteIndex(outAndBack(50));
+  const { lat, lon } = onEquatorAtKm(49.9);
+  assert.equal(passesOnRoute(index, [lon, lat], 150).length, 1);
+});
+
+test('passes closer than the separation limit count as one visit', () => {
+  // Leaves the radius and returns within a few hundred metres: a switchback.
+  const metresPerDeg = haversineMeters([0, 0], [1, 0]);
+  const deg = (m) => m / metresPerDeg;
+  const route = {
+    type: 'Feature',
+    geometry: {
+      type: 'LineString',
+      coordinates: [[deg(-500), 0], [0, 0], [deg(200), deg(100)], [deg(200), deg(300)], [deg(100), deg(100)], [deg(500), 0]]
+    }
+  };
+  assert.equal(passesOnRoute(buildRouteIndex(route), [0, 0], 50).length, 1);
+});
+
+test('filterPointsNearRoute records every pass and keeps the first as _alongKm', () => {
+  const route = outAndBack(50);
+  const [kept] = filterPointsNearRoute(route, [{ id: 1, ...onEquatorAtKm(10) }], 150);
+  assert.equal(kept._passesKm.length, 2);
+  assert.ok(Math.abs(kept._alongKm - 10) < 0.05);
+  assert.ok(Math.abs(kept._passesKm[1] - 90) < 0.05);
+});
+
+test('longestDryStretch counts the way home on an out-and-back', () => {
+  // Regression: each stop only counted once, so the whole return leg looked dry
+  // and this route reported a 60 km gap where the rider actually has 30.
+  const route = outAndBack(50);
+  const near = filterPointsNearRoute(route, [
+    { id: 1, ...onEquatorAtKm(10) },
+    { id: 2, ...onEquatorAtKm(40) }
+  ], 150);
+  const dry = longestDryStretch(100, near);
+  assert.ok(Math.abs(dry.gapKm - 30) < 0.1, `gap ${dry.gapKm}`);
+  assert.equal(dry.count, 4);
+});
+
+test('longestDryStretch still accepts points that only carry _alongKm', () => {
+  const dry = longestDryStretch(100, [{ _alongKm: 40 }]);
+  assert.ok(Math.abs(dry.gapKm - 60) < 1e-9);
+});
+
+test('ridePasses lists each pass in ride order', () => {
+  const rows = ridePasses([
+    { id: 'a', _alongKm: 10, _passesKm: [10, 90] },
+    { id: 'b', _alongKm: 40, _passesKm: [40, 60] }
+  ]);
+  assert.deepEqual(rows.map((r) => [r.id, r._alongKm]), [['a', 10], ['b', 40], ['b', 60], ['a', 90]]);
+});
+
+test('formatPassesKm names every pass, up to what fits on a head unit', () => {
+  assert.equal(formatPassesKm({ _alongKm: 47 }), 'km 47.0');
+  assert.equal(formatPassesKm({ _alongKm: 10, _passesKm: [10, 90] }), 'km 10.0, 90.0');
+  assert.equal(formatPassesKm({ _passesKm: [1, 2, 3, 4, 5] }), 'km 1.0, 2.0, 3.0 +2');
+  assert.equal(formatPassesKm({}), null);
 });

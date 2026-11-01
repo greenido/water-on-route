@@ -15,6 +15,13 @@ html, body { height: 100%; }
   font-size: 14px;
 }
 
+/* Might be water, might not: drawn so it does not read as a promise. */
+.water-marker.water-unconfirmed {
+  border-style: dashed;
+  border-color: #b98a2f;
+  opacity: 0.8;
+}
+
 .drop-anim {
   animation: dropIn 420ms cubic-bezier(0.22, 1, 0.36, 1);
   transform-origin: bottom center;

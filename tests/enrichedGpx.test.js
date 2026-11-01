@@ -43,7 +43,7 @@ test('waypoint names carry the position along the route', () => {
   const out = buildEnrichedGpx(PLAIN_GPX, POINTS);
   assert.ok(out.includes('<name>km 4.2 — Park Fountain</name>'));
   // Unnamed points fall back to their subtype.
-  assert.ok(out.includes('<name>km 11.8 — spring</name>'));
+  assert.ok(out.includes('<name>km 11.8 — spring (unconfirmed)</name>'));
 });
 
 test('waypointName falls back sensibly as tags thin out', () => {
@@ -57,6 +57,7 @@ test('waypointName falls back sensibly as tags thin out', () => {
 
 test('long routes format the position without a decimal', () => {
   assert.equal(waypointName({ _alongKm: 143.7, tags: { name: 'A' } }), 'km 144 — A');
+  assert.equal(waypointName({ _alongKm: 10, _passesKm: [10, 90], tags: { name: 'A' } }), 'km 10.0, 90.0 — A');
 });
 
 test('way and relation centers are used when there is no node position', () => {

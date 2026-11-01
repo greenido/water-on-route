@@ -142,6 +142,7 @@
         <div id="dryStretch" class="rounded-md border px-3 py-2 text-sm">
           <div class="text-xs uppercase tracking-wide opacity-70">Longest dry stretch</div>
           <div id="dryStretchValue" class="font-medium">—</div>
+          <div id="unconfirmedEffect" class="mt-1 pt-1 border-t border-current/20 text-xs opacity-90" hidden></div>
           <div id="refillEffect" class="mt-1 pt-1 border-t border-current/20 text-xs opacity-90" hidden></div>
         </div>
         <div>
@@ -206,7 +207,7 @@
           <li>Load your route: click "Select GPX / FIT" or drag-and-drop a .gpx or .fit file (Garmin devices).</li>
           <li>Choose a search radius. Only water points within this distance of your route are included.</li>
           <li>The map shows found water sources (drinking water, springs, taps, park fountains with potable water, water points). Hover/tap markers for subtype and details.</li>
-          <li>Read the summary: total distance, how many water stops, and the longest stretch with no water. That last number is the one to plan around — it turns amber past 25 km and red past 40 km.</li>
+          <li>Read the summary: total distance, how many water stops, and the longest stretch with no water. That last number is the one to plan around — it turns amber past 25 km and red past 40 km. It counts every time your route comes back past a stop, and only water you can rely on: springs, untagged taps and seasonal taps are marked "unconfirmed", and the box shows separately what they would do to the gap.</li>
           <li>The list and the strip under the map show the stops in the order you will ride past them, with the shaded band marking the dry stretch.</li>
           <li>Click "Download enriched GPX" to save your original route with water waypoints added. Each waypoint is named with its position, like "km 47.0 — Fountain", so it is readable on a head unit.</li>
           <li>Use "Clean map" anytime to clear the map and start over.</li>

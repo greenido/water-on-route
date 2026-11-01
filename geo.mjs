@@ -279,13 +279,96 @@ export function distanceToRouteMeters(index, lonLat, maxMeters = Infinity) {
   return nearest ? nearest.distanceM : Infinity;
 }
 
+// Two passes closer than this along the route are one visit: a switchback or a
+// spur to a viewpoint, not a second chance to fill up later in the ride.
+const MIN_PASS_SEPARATION_M = 1000;
+
 /**
- * Keep the POIs within maxMeters of the route, annotating each with _distanceM.
+ * Every time the route passes within maxMeters of a point, as metres along the
+ * route, in ride order.
+ *
+ * nearestOnRoute finds the single closest spot, which is the wrong question for
+ * a dry stretch: on an out-and-back or a lap route the rider meets the same
+ * fountain again, and the second visit is what shortens the gap on the way home.
+ *
+ * Each unbroken run of segments inside the radius is one pass, reported at its
+ * closest point. A pass near a turnaround can merge with its return (the route
+ * never left the radius), which misplaces it by at most about twice the radius.
+ *
+ * @param {object} index from buildRouteIndex
+ * @param {[number, number]} lonLat
+ * @param {number} maxMeters
+ * @returns {number[]} metres along the route, ascending
+ */
+export function passesOnRoute(index, lonLat, maxMeters) {
+  if (!index || index.isEmpty || !Number.isFinite(maxMeters)) return [];
+  const [px, py] = lonLatToWebMercator(lonLat[0], lonLat[1]);
+  const bound = maxMeters * mercatorScaleAtY(py);
+  const boundSq = bound * bound;
+
+  const runs = [];
+  let run = null;
+  const endRun = () => {
+    if (run) runs.push(run);
+    run = null;
+  };
+
+  for (const line of index.lines) {
+    if (px < line.minX - bound || px > line.maxX + bound ||
+        py < line.minY - bound || py > line.maxY + bound) {
+      endRun();
+      continue;
+    }
+    const { xy, cum } = line;
+    for (let i = 2; i < xy.length; i += 2) {
+      const ax = xy[i - 2], ay = xy[i - 1];
+      const bx = xy[i], by = xy[i + 1];
+      if (px < Math.min(ax, bx) - bound || px > Math.max(ax, bx) + bound ||
+          py < Math.min(ay, by) - bound || py > Math.max(ay, by) + bound) {
+        endRun();
+        continue;
+      }
+      const abx = bx - ax;
+      const aby = by - ay;
+      const abLen2 = abx * abx + aby * aby;
+      let t = abLen2 === 0 ? 0 : ((px - ax) * abx + (py - ay) * aby) / abLen2;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const dx = px - (ax + t * abx);
+      const dy = py - (ay + t * aby);
+      const dSq = dx * dx + dy * dy;
+      if (dSq > boundSq) {
+        endRun();
+        continue;
+      }
+      if (!run || dSq < run.dSq) {
+        const v = i / 2;
+        run = { dSq, alongM: line.startM + cum[v - 1] + t * (cum[v] - cum[v - 1]) };
+      }
+    }
+  }
+  endRun();
+
+  const passes = [];
+  for (const current of runs) {
+    const previous = passes[passes.length - 1];
+    if (previous && current.alongM - previous.alongM < MIN_PASS_SEPARATION_M) {
+      if (current.dSq < previous.dSq) passes[passes.length - 1] = current;
+    } else {
+      passes.push(current);
+    }
+  }
+  return passes.map((pass) => pass.alongM);
+}
+
+/**
+ * Keep the POIs within maxMeters of the route, annotating each with _distanceM
+ * (closest approach), _passesKm (every pass, in ride order) and _alongKm (the
+ * first pass, so a sort gives the order the rider first meets them).
  * @param {object|null} geojsonRoute
  * @param {Array<object>} points Overpass-shaped POIs
  * @param {number} maxMeters
  * @param {object} [routeIndex] a prebuilt index, to avoid re-projecting
- * @returns {Array<object>} copies carrying _distanceM
+ * @returns {Array<object>} copies carrying _distanceM, _alongKm and _passesKm
  */
 export function filterPointsNearRoute(geojsonRoute, points, maxMeters, routeIndex) {
   const index = routeIndex || buildRouteIndex(geojsonRoute);
@@ -296,7 +379,9 @@ export function filterPointsNearRoute(geojsonRoute, points, maxMeters, routeInde
     if (!pt) continue;
     const nearest = nearestOnRoute(index, pt, maxMeters);
     if (nearest && nearest.distanceM <= maxMeters) {
-      result.push({ ...p, _distanceM: nearest.distanceM, _alongKm: nearest.alongM / 1000 });
+      const passes = passesOnRoute(index, pt, maxMeters);
+      const passesKm = (passes.length ? passes : [nearest.alongM]).map((m) => m / 1000);
+      result.push({ ...p, _distanceM: nearest.distanceM, _alongKm: passesKm[0], _passesKm: passesKm });
     }
   }
   return result;
@@ -312,6 +397,39 @@ export function formatKm(km) {
   return km >= 100 ? String(Math.round(km)) : km.toFixed(1);
 }
 
+// More positions than this will not fit on a head unit, or in a sidebar row.
+const MAX_PASSES_SHOWN = 3;
+
+/**
+ * Where a stop sits along the ride: "km 10.0", or "km 10.0, 90.0" when the route
+ * comes back past it. Shared by the sidebar, the popups and the waypoint names.
+ *
+ * @returns {string|null} null when the point has no position along the route
+ */
+export function formatPassesKm(point) {
+  const passes = passesKmOf(point);
+  if (!passes.length) return null;
+  const shown = passes.slice(0, MAX_PASSES_SHOWN).map(formatKm).join(', ');
+  const extra = passes.length - MAX_PASSES_SHOWN;
+  return `km ${shown}${extra > 0 ? ` +${extra}` : ''}`;
+}
+
+/** A point's passes in km, falling back to _alongKm for points without any. */
+function passesKmOf(point) {
+  const passes = point?._passesKm ?? [point?._alongKm];
+  return passes.filter((km) => Number.isFinite(km));
+}
+
+/**
+ * One entry per time the route passes a stop, in ride order, for anything that
+ * reads as "what do I meet next". Each copy's _alongKm is that pass.
+ */
+export function ridePasses(points) {
+  return (points || [])
+    .flatMap((p) => passesKmOf(p).map((km) => ({ ...p, _alongKm: km })))
+    .sort((a, b) => a._alongKm - b._alongKm);
+}
+
 /** Order by position along the route, which is the order they are ridden in. */
 export function sortPointsAlongRoute(points) {
   return [...points].sort((a, b) => (a._alongKm ?? Infinity) - (b._alongKm ?? Infinity));
@@ -325,15 +443,13 @@ export function sortPointsAlongRoute(points) {
  * the nearest fountain" but "how long am I without one".
  *
  * @param {number} routeKm total route length
- * @param {Array<{_alongKm: number}>} points water points carrying _alongKm
+ * @param {Array<{_alongKm: number, _passesKm?: number[]}>} points water points;
+ *   every pass counts, so a fountain met twice breaks the gap twice
  * @returns {{gapKm: number, startKm: number, endKm: number, count: number}}
  */
 export function longestDryStretch(routeKm, points) {
   const total = Number.isFinite(routeKm) && routeKm > 0 ? routeKm : 0;
-  const marks = (points || [])
-    .map((p) => p._alongKm)
-    .filter((km) => Number.isFinite(km))
-    .sort((a, b) => a - b);
+  const marks = (points || []).flatMap(passesKmOf).sort((a, b) => a - b);
 
   if (!total) return { gapKm: 0, startKm: 0, endKm: 0, count: marks.length };
   if (!marks.length) return { gapKm: total, startKm: 0, endKm: total, count: 0 };

@@ -14,8 +14,7 @@
 
 // Node 22 can require() an ES module, so the naming rules live in one place
 // rather than being copied from the client.
-const { waterSubtypeLabel } = require('../osmApi.mjs');
-const { formatKm } = require('../geo.mjs');
+const { waterSubtypeLabel, waterWaypointName } = require('../osmApi.mjs');
 
 const GPX_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 
@@ -36,9 +35,7 @@ function pointCoordinates(point) {
  * file is indistinguishable from one exported in the browser.
  */
 function waypointName(point) {
-  const tags = point?.tags || {};
-  const label = tags.name || tags.description || waterSubtypeLabel(tags) || 'Water';
-  return Number.isFinite(point?._alongKm) ? `km ${formatKm(point._alongKm)} — ${label}` : label;
+  return waterWaypointName(point);
 }
 
 function waypointXml(point) {
