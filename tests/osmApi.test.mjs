@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   isPotableWaterTags,
+  waterCaution,
+  waterWaypointName,
   waterSubtypeLabel,
   isCoffeeTags,
   bboxSpan,
@@ -534,4 +536,46 @@ test('the client asks the proxy for the nearby kind and keeps only nearby stops'
   assert.equal(sent[0].kind, 'nearby');
   assert.deepEqual(sent[0].bbox, BBOX);
   assert.deepEqual(points.map((p) => p.id), [1, 2, 3]);
+});
+
+test('the route search rejects what near me rejects', () => {
+  // Regression: private taps and hot springs were dropped from near me but still
+  // counted as stops, and shortened the dry stretch, on a route.
+  const offLimits = [
+    { man_made: 'water_tap', access: 'private' },
+    { amenity: 'drinking_water', access: 'no' },
+    { natural: 'spring', name: 'Spencer Hot Springs' },
+    { natural: 'spring', temperature: '45' },
+    { natural: 'hot_spring' }
+  ];
+  for (const tags of offLimits) {
+    assert.equal(isPotableWaterTags(tags), false, JSON.stringify(tags));
+    assert.equal(nearbyKind(tags), null, JSON.stringify(tags));
+  }
+  assert.ok(isPotableWaterTags({ man_made: 'water_tap', access: 'yes' }));
+});
+
+test('waterCaution flags water nobody has vouched for', () => {
+  assert.match(waterCaution({ natural: 'spring' }), /Not confirmed/);
+  assert.match(waterCaution({ man_made: 'water_tap' }), /Not confirmed/);
+  assert.match(waterCaution({ amenity: 'drinking_water', seasonal: 'summer' }), /Seasonal/);
+  assert.match(waterCaution({ natural: 'spring', drinking_water: 'yes', seasonal: 'yes' }), /Seasonal/);
+});
+
+test('waterCaution leaves water that is tagged as drinkable alone', () => {
+  assert.equal(waterCaution({ amenity: 'drinking_water' }), null);
+  assert.equal(waterCaution({ amenity: 'drinking_water', seasonal: 'no' }), null);
+  assert.equal(waterCaution({ amenity: 'water_point' }), null);
+  assert.equal(waterCaution({ natural: 'spring', drinking_water: 'yes' }), null);
+  assert.equal(waterCaution({ man_made: 'water_tap', drinking_water: 'compatible' }), null);
+  assert.equal(waterCaution(null), null);
+});
+
+test('waterWaypointName carries every pass and any doubt to the head unit', () => {
+  assert.equal(
+    waterWaypointName({ _alongKm: 10, _passesKm: [10, 90], tags: { amenity: 'drinking_water', name: 'Park Fountain' } }),
+    'km 10.0, 90.0 — Park Fountain'
+  );
+  assert.equal(waterWaypointName({ _alongKm: 12, tags: { natural: 'spring' } }), 'km 12.0 — spring (unconfirmed)');
+  assert.equal(waterWaypointName({ tags: { amenity: 'drinking_water', name: 'Park Fountain' } }), 'Park Fountain');
 });

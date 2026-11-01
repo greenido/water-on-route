@@ -38,6 +38,8 @@ import {
   nearbySpots,
   nearbyLabel,
   directionsUrl,
+  waterCaution,
+  waterWaypointName,
 } from './osmApi.mjs';
 import { parseFitToGeoJSON } from './fitToGeoJSON.mjs';
 import {
@@ -52,6 +54,8 @@ import {
   bboxAroundPoint,
   compassPoint,
   formatMeters,
+  formatPassesKm,
+  ridePasses,
 } from './geo.mjs';
 
 // Basic UI elements
@@ -78,6 +82,7 @@ const summaryCountEl = document.getElementById('summaryCount');
 const dryStretchEl = document.getElementById('dryStretch');
 const dryStretchValueEl = document.getElementById('dryStretchValue');
 const refillEffectEl = document.getElementById('refillEffect');
+const unconfirmedEffectEl = document.getElementById('unconfirmedEffect');
 const waterListEl = document.getElementById('waterList');
 const profilePanel = document.getElementById('profilePanel');
 const profileSvg = document.getElementById('profile');
@@ -260,7 +265,12 @@ let currentRouteGeoJSON = null;
 // covers it. Lift everything we found above the file's own waypoints.
 const POI_Z_OFFSET = 1000;
 let waterLayer = L.layerGroup().addTo(map);
-const baseWaterIcon = () => L.divIcon({ className: 'water-marker', html: '💧', iconSize: [24, 24], iconAnchor: [12, 12] });
+const baseWaterIcon = (tags) => L.divIcon({
+  className: waterCaution(tags) ? 'water-marker water-unconfirmed' : 'water-marker',
+  html: '💧',
+  iconSize: [24, 24],
+  iconAnchor: [12, 12]
+});
 let refillLayer = L.layerGroup().addTo(map);
 // Distinct glyphs per tier: a guaranteed tap and a "worth a try" cemetery
 // should not look identical on the map.
@@ -521,24 +531,26 @@ function dryStretchSeverity(gapKm) {
   return { tone: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200', note: 'comfortable' };
 }
 
+/** Water the headline dry stretch may rely on. */
+const confirmedWater = (points) => points.filter((p) => !waterCaution(p.tags));
+
 /**
- * Second line under the dry stretch: how far the gap shrinks once refill
- * stops are counted. Hidden until a refill search has actually run.
+ * A line under the dry stretch: how far the gap shrinks once some less certain
+ * stops are counted. Hidden when there are none of them.
  */
-function renderRefillEffect(waterOnlyDry) {
-  if (!refillEffectEl) return;
-  if (!nearRefillPoints.length) {
-    refillEffectEl.hidden = true;
+function renderDryEffect(el, confirmedDry, confirmed, extra, singular, plural) {
+  if (!el) return;
+  if (!extra.length) {
+    el.hidden = true;
     return;
   }
-  refillEffectEl.hidden = false;
-  const combined = longestDryStretch(currentRouteKm, [...lastNearWaterPoints, ...nearRefillPoints]);
-  const saved = waterOnlyDry.gapKm - combined.gapKm;
-  const count = nearRefillPoints.length;
-  const plural = count === 1 ? 'refill stop' : 'refill stops';
-  refillEffectEl.textContent = saved > 0.05
-    ? `With ${count} ${plural}: ${formatKm(combined.gapKm)} km (km ${formatKm(combined.startKm)} to ${formatKm(combined.endKm)})`
-    : `${count} ${plural} found, but none inside the dry stretch`;
+  el.hidden = false;
+  const combined = longestDryStretch(currentRouteKm, [...confirmed, ...extra]);
+  const saved = confirmedDry.gapKm - combined.gapKm;
+  const noun = extra.length === 1 ? singular : plural;
+  el.textContent = saved > 0.05
+    ? `With ${extra.length} ${noun}: ${formatKm(combined.gapKm)} km (km ${formatKm(combined.startKm)} to ${formatKm(combined.endKm)})`
+    : `${extra.length} ${noun} found, but none inside the dry stretch`;
 }
 
 /** Sidebar summary: distance, count, worst gap, and the stops in ride order. */
@@ -550,30 +562,35 @@ function renderSummary(points) {
   }
   summaryEl.hidden = false;
   summaryDistanceEl.textContent = `${formatKm(currentRouteKm)} km`;
-  summaryCountEl.textContent = String(points.length);
+  const confirmed = confirmedWater(points);
+  const unconfirmed = points.length - confirmed.length;
+  summaryCountEl.textContent = unconfirmed ? `${confirmed.length} + ${unconfirmed} unconfirmed` : String(points.length);
 
-  const dry = longestDryStretch(currentRouteKm, points);
+  const dry = longestDryStretch(currentRouteKm, confirmed);
   const severity = dryStretchSeverity(dry.gapKm);
   dryStretchEl.className = `rounded-md border px-3 py-2 text-sm ${severity.tone}`;
-  dryStretchValueEl.textContent = points.length
+  dryStretchValueEl.textContent = confirmed.length
     ? `${formatKm(dry.gapKm)} km — km ${formatKm(dry.startKm)} to ${formatKm(dry.endKm)} (${severity.note})`
-    : `${formatKm(dry.gapKm)} km — no water found on this route`;
+    : `${formatKm(dry.gapKm)} km — no ${unconfirmed ? 'confirmed ' : ''}water found on this route`;
 
-  // The reason refill stops exist: show what they do to the worst gap. Kept as
-  // a separate line rather than folded into the headline number, because a
-  // fuel station is not the same promise as a tagged tap.
-  renderRefillEffect(dry);
+  // Show what the less certain stops do to the worst gap. Kept as separate
+  // lines rather than folded into the headline number, because neither an
+  // untested spring nor a fuel station is the same promise as a tagged tap.
+  renderDryEffect(unconfirmedEffectEl, dry, confirmed, points.filter((p) => waterCaution(p.tags)), 'unconfirmed source', 'unconfirmed sources');
+  renderDryEffect(refillEffectEl, dry, confirmed, nearRefillPoints, 'refill stop', 'refill stops');
 
   waterListEl.replaceChildren();
-  for (const p of points) {
+  // One row per pass: an out-and-back meets its fountains again on the way home.
+  for (const p of ridePasses(points)) {
     const li = document.createElement('li');
     li.className = 'flex items-baseline gap-2 text-slate-300';
     const km = document.createElement('span');
     km.className = 'tabular-nums text-slate-400 w-16 shrink-0';
-    km.textContent = Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : '—';
+    km.textContent = `km ${formatKm(p._alongKm)}`;
     const label = document.createElement('span');
     label.className = 'truncate';
-    label.textContent = (p.tags && (p.tags.name || p.tags.description)) || waterSubtypeLabel(p.tags);
+    const name = (p.tags && (p.tags.name || p.tags.description)) || waterSubtypeLabel(p.tags);
+    label.textContent = waterCaution(p.tags) ? `${name} (unconfirmed)` : name;
     li.append(km, label);
     waterListEl.appendChild(li);
   }
@@ -622,8 +639,9 @@ function renderProfile(points) {
   parts.push(stroke);
 
   // Shade the worst gap so it reads at a glance.
-  const dry = longestDryStretch(totalKm, points);
-  if (dry.gapKm > 0 && points.length) {
+  const confirmed = confirmedWater(points);
+  const dry = longestDryStretch(totalKm, confirmed);
+  if (dry.gapKm > 0 && confirmed.length) {
     const band = document.createElementNS(ns, 'rect');
     band.setAttribute('x', String(xAt(dry.startKm)));
     band.setAttribute('y', '0');
@@ -633,15 +651,16 @@ function renderProfile(points) {
     parts.unshift(band);
   }
 
-  for (const p of points) {
-    if (!Number.isFinite(p._alongKm)) continue;
+  for (const p of ridePasses(points)) {
     const x = xAt(p._alongKm);
     const tick = document.createElementNS(ns, 'line');
+    const unconfirmed = !!waterCaution(p.tags);
     tick.setAttribute('x1', String(x));
     tick.setAttribute('x2', String(x));
     tick.setAttribute('y1', '0');
     tick.setAttribute('y2', String(H));
-    tick.setAttribute('stroke', '#22d3ee');
+    tick.setAttribute('stroke', unconfirmed ? '#fbbf24' : '#22d3ee');
+    if (unconfirmed) tick.setAttribute('stroke-dasharray', '4 4');
     tick.setAttribute('stroke-width', '1');
     tick.setAttribute('vector-effect', 'non-scaling-stroke');
     tick.setAttribute('opacity', '0.85');
@@ -670,10 +689,16 @@ function renderWaterMarkers(points, animate = false) {
     const subtypeLine = document.createElement('div');
     subtypeLine.textContent = subtype;
     popup.appendChild(subtypeLine);
+    const caution = waterCaution(p.tags);
+    if (caution) {
+      const cautionLine = document.createElement('div');
+      cautionLine.textContent = caution;
+      popup.appendChild(cautionLine);
+    }
     // Where it sits along the ride matters more than how far off-route it is.
     const positionLine = document.createElement('div');
     positionLine.textContent = [
-      Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : null,
+      formatPassesKm(p),
       Number.isFinite(p._distanceM) ? `${Math.round(p._distanceM)} m off route` : null
     ].filter(Boolean).join(' · ');
     if (positionLine.textContent) popup.appendChild(positionLine);
@@ -683,7 +708,7 @@ function renderWaterMarkers(points, animate = false) {
     mapsLink.rel = 'noopener';
     mapsLink.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
     popup.appendChild(mapsLink);
-    const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon(), zIndexOffset: POI_Z_OFFSET })
+    const marker = L.marker([lat, lon], { title: name, icon: baseWaterIcon(p.tags), zIndexOffset: POI_Z_OFFSET })
       .bindPopup(popup)
       .addTo(waterLayer);
     if (animate) {
@@ -874,7 +899,7 @@ function renderRefillMarkers(points, animate = false) {
     if (tags.name) addLine(kind);
     addLine(refillExpectation(tags));
     addLine([
-      Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)}` : null,
+      formatPassesKm(p),
       Number.isFinite(p._distanceM) ? `${Math.round(p._distanceM)} m off route` : null
     ].filter(Boolean).join(' · '));
     addLine(tags.opening_hours ? `Hours: ${tags.opening_hours}` : null);
@@ -998,6 +1023,32 @@ async function renderCoffeeMarkers(points, animate = false) {
   });
 }
 
+/**
+ * Forget everything found for the current route. Every result belongs to one
+ * route: a refill stop's km means nothing on the next file, and leaving it in
+ * place put the old route's stops into the new route's dry stretch.
+ */
+function clearRouteResults() {
+  waterLayer.clearLayers();
+  refillLayer.clearLayers();
+  coffeeLayer.clearLayers();
+  foundWaterPoints = [];
+  foundCoffeePoints = [];
+  foundRefillPoints = [];
+  nearRefillPoints = [];
+  lastNearWaterPoints = [];
+  // Off until this route's search succeeds, or a failed search would still
+  // offer an "enriched" download with no water in it.
+  downloadBtn.disabled = true;
+  if (shareBtn) shareBtn.disabled = true;
+  if (summaryEl) summaryEl.hidden = true;
+  if (waterListEl) waterListEl.replaceChildren();
+  if (refillEffectEl) { refillEffectEl.hidden = true; refillEffectEl.textContent = ''; }
+  if (unconfirmedEffectEl) { unconfirmedEffectEl.hidden = true; unconfirmedEffectEl.textContent = ''; }
+  if (profilePanel) profilePanel.hidden = true;
+  if (profileSvg) profileSvg.replaceChildren();
+}
+
 // Reset app state and UI
 function resetApp() {
   try {
@@ -1008,25 +1059,16 @@ function resetApp() {
     routeLayer = null;
     routeWaypointLayer = null;
     if (routeWaypointsControl) routeWaypointsControl.hidden = true;
-    if (waterLayer) { waterLayer.clearLayers(); }
-    if (refillLayer) { refillLayer.clearLayers(); }
-    if (coffeeLayer) { coffeeLayer.clearLayers(); }
+    clearRouteResults();
     clearNearby();
     // Reset state
     currentRouteGeoJSON = null;
     originalGpxText = '';
-    foundWaterPoints = [];
-    foundCoffeePoints = [];
-    foundRefillPoints = [];
-    nearRefillPoints = [];
-    lastNearWaterPoints = [];
     currentRouteFilename = 'route.gpx';
     savedRouteForFile = false;
     currentShareToken = null;
     currentRouteIndex = null;
     currentRouteKm = 0;
-    downloadBtn.disabled = true;
-    if (shareBtn) shareBtn.disabled = true;
     // Clear route query param from URL if present
     try {
       const currentUrl = new URL(window.location.href);
@@ -1037,12 +1079,6 @@ function resetApp() {
         window.history.replaceState({}, '', newUrl);
       }
     } catch (_) {}
-    // Hide the route-specific panels rather than leaving stale numbers up
-    if (summaryEl) summaryEl.hidden = true;
-    if (waterListEl) waterListEl.replaceChildren();
-    if (refillEffectEl) { refillEffectEl.hidden = true; refillEffectEl.textContent = ''; }
-    if (profilePanel) profilePanel.hidden = true;
-    if (profileSvg) profileSvg.replaceChildren();
     // Clear inputs and status
     if (fileInput) fileInput.value = '';
     if (dropZone && dropZone.classList) dropZone.classList.remove('dragover');
@@ -1102,13 +1138,14 @@ const MAX_ROUTE_FILE_BYTES = 8 * 1024 * 1024;
 
 async function parseGpxFile(file) {
   const text = await file.text();
-  originalGpxText = text;
   const parser = new DOMParser();
   const xml = parser.parseFromString(text, 'application/xml');
   const geojson = toGeoJSON.gpx(xml);
   if (!geojson || !geojson.features || geojson.features.length === 0) {
     throw new Error('No features found in GPX.');
   }
+  // Only once it parses: a bad file must not replace the route still on screen.
+  originalGpxText = text;
   return geojson;
 }
 
@@ -1138,14 +1175,12 @@ function combineToEnrichedGpx(geojsonRoute, waterPoints, radiusMeters, routeInde
     .map(p => {
       const lat = p.lat ?? p.center.lat;
       const lon = p.lon ?? p.center.lon;
-      const label = p.tags?.name || p.tags?.description || waterSubtypeLabel(p.tags) || 'Water';
       const type = waterSubtypeLabel(p.tags) || p._type || 'water';
-      // Prefix the ride position so the waypoints are useful on a head unit,
-      // where they otherwise arrive as a row of identically named dots.
-      const name = Number.isFinite(p._alongKm) ? `km ${formatKm(p._alongKm)} — ${label}` : label;
+      // The ride position makes the waypoints useful on a head unit, where they
+      // otherwise arrive as a row of identically named dots.
       return {
         type: 'Feature',
-        properties: { name, type },
+        properties: { name: waterWaypointName(p), type },
         geometry: { type: 'Point', coordinates: [lon, lat] }
       };
     });
@@ -1267,6 +1302,7 @@ async function handleRouteFile(file) {
   setError('');
   setStatus(`Parsing ${file.name} …`);
   const geojson = await parseRouteFile(file);
+  clearRouteResults();
   renderRoute(geojson);
   currentRouteGeoJSON = geojson;
   // A new file is a new route: allow exactly one save for it.
@@ -1584,6 +1620,7 @@ function nearbyPopup(p) {
     popup.appendChild(line);
   };
   if (tags.name || tags.brand) addLine(label);
+  if (p.kind === 'water') addLine(waterCaution(tags));
   addLine(`${nearbyDistanceText(p)} from you`);
   addLine(tags.opening_hours ? `Hours: ${tags.opening_hours}` : null);
   const link = document.createElement('a');
@@ -1640,7 +1677,11 @@ function renderNearby(animate = false) {
     name.textContent = tags.name || tags.brand || label;
     const detail = document.createElement('span');
     detail.className = 'block truncate text-xs text-slate-400';
-    detail.textContent = [tags.name || tags.brand ? label : null, tags.opening_hours].filter(Boolean).join(' · ');
+    detail.textContent = [
+      tags.name || tags.brand ? label : null,
+      p.kind === 'water' && waterCaution(tags) ? 'unconfirmed' : null,
+      tags.opening_hours
+    ].filter(Boolean).join(' · ');
     text.append(name, detail);
     show.append(icon, text);
     show.addEventListener('click', () => focusNearbySpot(p));

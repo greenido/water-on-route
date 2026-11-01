@@ -1,6 +1,6 @@
 // Small, dependency-free OSM API utilities with adaptive splitting and backoff
 
-import { haversineMeters, bearingDegrees } from './geo.mjs';
+import { haversineMeters, bearingDegrees, formatPassesKm } from './geo.mjs';
 
 export function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -63,10 +63,30 @@ export function getOverpassUrl() {
   return '/api/overpass';
 }
 
-/** Potable water: classic OSM tags plus park fountains / taps / wells. Excludes drinking_water=no. */
+function isHotSpring(tags) {
+  return tags.natural === 'hot_spring'
+    || tags['bath:type'] === 'hot_spring'
+    || /hot\s*spring/i.test(tags.name || '')
+    || Number.parseFloat(tags.temperature) >= 30;
+}
+
+/** You cannot ride up and fill a bottle here, however it is tagged. */
+function isOffLimits(tags) {
+  return tags.access === 'private' || tags.access === 'no';
+}
+
+/**
+ * Potable water: classic OSM tags plus park fountains / taps / wells. Excludes
+ * drinking_water=no, private taps and hot springs.
+ *
+ * Both the route search and near me go through here, so a stop one of them
+ * rejects cannot count toward the other's dry stretch. See waterCaution for the
+ * stops that pass this but are not a promise.
+ */
 export function isPotableWaterTags(tags) {
   if (!tags || typeof tags !== 'object') return false;
   if (tags.drinking_water === 'no') return false;
+  if (isOffLimits(tags) || isHotSpring(tags)) return false;
 
   const amenity = tags.amenity;
   const naturalTag = tags.natural;
@@ -81,6 +101,34 @@ export function isPotableWaterTags(tags) {
   if (manMade === 'water_well' && (drinking === 'yes' || drinking === 'compatible')) return true;
   if (drinking === 'yes' || drinking === 'compatible') return true;
   return false;
+}
+
+/**
+ * Why a water stop should not be relied on, or null when nothing says so.
+ *
+ * A spring or an untagged tap may well be water, but nobody has said you can
+ * drink it, and a seasonal tap may be shut off when you arrive. These are kept
+ * on the map and labelled, and they do not shorten the headline dry stretch: a
+ * rider who trusts that number and finds a dry tap is worse off than one who
+ * was told to carry more.
+ *
+ * @returns {string|null}
+ */
+export function waterCaution(tags) {
+  const t = tags || {};
+  if (t.seasonal && t.seasonal !== 'no') return 'Seasonal: it may be shut off when you get there';
+  if (t.drinking_water === 'yes' || t.drinking_water === 'compatible') return null;
+  if (t.natural === 'spring' || t.man_made === 'water_tap') return 'Not confirmed drinkable: treat it or ask first';
+  return null;
+}
+
+/** Name for a waypoint on a head unit: "km 47.0 — Fountain". Client and server share it. */
+export function waterWaypointName(point) {
+  const tags = point?.tags || {};
+  const label = tags.name || tags.description || waterSubtypeLabel(tags) || 'Water';
+  const position = formatPassesKm(point);
+  const named = position ? `${position} — ${label}` : label;
+  return waterCaution(tags) ? `${named} (unconfirmed)` : named;
 }
 
 /** Short subtype label for UI (fountain, tap, spring, …). */
@@ -484,19 +532,11 @@ export function sortPointsByDistance(points) {
  */
 export function nearbyKind(tags) {
   if (!tags || typeof tags !== 'object') return null;
-  if (tags.access === 'private' || tags.access === 'no') return null;
-  if (isHotSpring(tags)) return null;
+  if (isOffLimits(tags) || isHotSpring(tags)) return null;
   if (isCoffeeTags(tags)) return 'coffee';
   if (tags.amenity === 'fuel' || tags.shop === 'convenience') return 'shop';
   if (isPotableWaterTags(tags)) return 'water';
   return null;
-}
-
-function isHotSpring(tags) {
-  return tags.natural === 'hot_spring'
-    || tags['bath:type'] === 'hot_spring'
-    || /hot\s*spring/i.test(tags.name || '')
-    || Number.parseFloat(tags.temperature) >= 30;
 }
 
 /** Short label for a nearby stop, e.g. "Fountain", "Café", "Fuel station". */

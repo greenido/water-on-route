@@ -22,7 +22,9 @@ Find potable water sources along a GPX or Garmin FIT route. Upload a route file,
   graded by how sure you can be of getting water, for the rural routes where
   `amenity=drinking_water` is thin on the ground
 - Water points reported by position along the route (km 47), not just how far off it they sit
-- Longest dry stretch called out, including the run-in from the start and run-out to the finish
+- Longest dry stretch called out, including the run-in from the start and run-out to the finish.
+  It counts every pass of a stop, so out-and-backs and laps read correctly, and only water you can
+  rely on: springs, untagged taps and seasonal taps are marked "unconfirmed" and shown as a separate line
 - Elevation strip under the map with a tick per water point and the dry stretch shaded
 - One-click download of an enriched `.gpx` whose waypoints are named `km 47.0 — Fountain`
 - Local proxy for Overpass and tiles to avoid CORS and respect usage policies
