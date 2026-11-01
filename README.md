@@ -97,8 +97,11 @@ Notes:
     `tourism=camp_site|picnic_site|wilderness_hut|alpine_hut`, cemeteries and water points.
     Each is graded `certain` (tagged as drinking water), `likely` (staffed, ask inside) or
     `maybe`, and ranked by that grade before distance
-  - Splits a square and retries on 400/413/429/504 responses, asks twice more on 502/503, and dedupes by OSM type+id.
-    A square that still fails leaves a visible warning rather than failing the whole search
+  - Splits a square only when it is too big (400/413), asks twice more when the server is busy (429/502/503/504),
+    and dedupes by OSM type+id. A square that still fails leaves a visible warning rather than failing the whole
+    search, and a search stops after 3 minutes, however busy the servers are
+  - Results appear as each square comes back. The busy overlay lifts at the first one, or after 15 s, and the
+    search carries on behind a small progress pill so the page stays usable
   - Squares are fetched concurrently behind a shared cap (2 in flight by default) so one route load cannot flood Overpass
   - Lets you download an enriched GPX that includes the discovered water points as waypoints
   - Near me: takes one position fix, sends a box around it (padded out to a ~500 m grid so
@@ -255,8 +258,9 @@ The Express server exposes a few endpoints:
   - Successful responses are cached in memory (LRU, bounded by count, bytes and age). Route kinds
     are also cached on disk, so they survive a restart; `nearby` never is. The reply carries `X-Cache: HIT`,
     `DISK` or `MISS`
-  - A 200 whose body is an Overpass runtime error, or is not OSM data at all, is treated as a busy upstream and
-    never cached. An answer over the size limit comes back as `413`, which the client treats as a signal to split
+  - A 200 whose body is an Overpass runtime error, or is not OSM data at all, moves on to the next upstream and is
+    never cached. An answer over the size limit, or a runtime error from every upstream, comes back as `413`, which
+    the client treats as a signal to split. A busy upstream comes back as its own status, which the client retries
   - Returns the Overpass response as text, passing through the content-type when available
 - `GET /tiles/{z}/{x}/{y}.png` – tile proxy
   - Fetches the tile from `TILE_URL_TEMPLATE` and forwards it with caching headers
@@ -362,7 +366,9 @@ Ensure your service listens on port 3000 (already configured) and the volume mou
 
 - 429/504 or partial results from Overpass
   - The proxy falls back to `OVERPASS_FALLBACK_URLS` when the primary is busy, and logs
-    `[overpass] … trying …` when it does. The frontend uses adaptive splitting and exponential backoff. Try reducing the route size, waiting longer, or running a local Overpass instance.
+    `[overpass] … trying …` when it does. The frontend retries a few seconds apart, and what still fails is
+    flagged with a "Try again" button; sections that came back are answered from the cache. Try waiting longer or
+    running a local Overpass instance.
   - Increase `OVERPASS_TIMEOUT_MS` on the proxy if needed, up to about 60 s: the browser stops waiting at 65 s.
 
 - Tiles are slow or rate-limited

@@ -174,8 +174,8 @@ const fetchWithBodies = (bodies) => {
 };
 
 test('overpassBodyFailure spots a timeout reported inside a 200', () => {
-  assert.match(overpassBodyFailure(Buffer.from(REMARK)), /runtime error/);
-  assert.match(overpassBodyFailure(Buffer.from('<html>busy</html>')), /other than OSM/);
+  assert.deepEqual(overpassBodyFailure(Buffer.from(REMARK)), { reason: 'reported a runtime error', status: 413 });
+  assert.deepEqual(overpassBodyFailure(Buffer.from('<html>busy</html>')), { reason: 'sent something other than OSM data', status: 504 });
   assert.equal(overpassBodyFailure(Buffer.from('<?xml version="1.0"?><osm version="0.6"><node id="1"/></osm>')), null);
   // Other remarks are informational, not failures.
   assert.equal(overpassBodyFailure(Buffer.from('<osm><remark>note</remark></osm>')), null);
@@ -183,7 +183,7 @@ test('overpassBodyFailure spots a timeout reported inside a 200', () => {
 
 test('overpassBodyFailure finds the remark after a large partial answer', () => {
   const big = `<osm>${'<node id="1"/>'.repeat(100000)}<remark> runtime error: out of memory </remark></osm>`;
-  assert.match(overpassBodyFailure(Buffer.from(big)), /runtime error/);
+  assert.match(overpassBodyFailure(Buffer.from(big)).reason, /runtime error/);
 });
 
 test('a 200 reporting a runtime error moves on to the mirror', async () => {
@@ -195,12 +195,12 @@ test('a 200 reporting a runtime error moves on to the mirror', async () => {
   assert.equal(result.body.toString(), good);
 });
 
-test('when every upstream reports a runtime error the answer is a 504, not a 200', async () => {
+test('when every upstream reports a runtime error the answer is a 413, not a 200', async () => {
   // Regression: passed along as a 200, this read as "no water here" and was
   // cached for hours.
   const { fetchImpl } = fetchWithBodies({ [PRIMARY]: REMARK, [MIRROR]: REMARK });
   const result = await run(fetchImpl);
-  assert.equal(result.status, 504);
+  assert.equal(result.status, 413, 'the query may fit as a smaller box');
   assert.equal(result.ok, false);
 });
 
@@ -211,4 +211,11 @@ test('an answer over the size limit is final: the mirror has the same data', asy
   };
   await assert.rejects(run(fetchImpl, { readBody }), { code: RESPONSE_TOO_LARGE });
   assert.deepEqual(calls.map((c) => c.url), [PRIMARY]);
+});
+
+test('an error page in a 200 from every upstream is a busy answer, which the client retries', async () => {
+  const { fetchImpl } = fetchWithBodies({ [PRIMARY]: '<html>busy</html>', [MIRROR]: '<html>busy</html>' });
+  const result = await run(fetchImpl);
+  assert.equal(result.status, 504);
+  assert.equal(result.ok, false);
 });

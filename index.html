@@ -130,6 +130,13 @@
       <div id="status" class="text-sm text-slate-400 min-h-[18px]" aria-live="polite"></div>
       <div id="error" class="text-sm text-red-400" role="alert" hidden></div>
 
+      <!-- Outside the summary: when nothing came back there is no summary to show,
+           and this is the only way to ask again. -->
+      <div id="coverageWarning" class="rounded-md border border-amber-500/50 bg-amber-500/10 text-amber-200 px-3 py-2 text-sm space-y-2" role="status" hidden>
+        <p id="coverageText"></p>
+        <button type="button" id="coverageRetryBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">Try again</button>
+      </div>
+
       <!-- Route summary: the numbers you actually plan around -->
       <div id="summary" class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-3" hidden>
         <div class="grid grid-cols-2 gap-2 text-sm">
@@ -141,10 +148,6 @@
             <div class="text-slate-500 text-xs uppercase tracking-wide">Water stops</div>
             <div id="summaryCount" class="text-slate-100 font-medium">—</div>
           </div>
-        </div>
-        <div id="coverageWarning" class="rounded-md border border-amber-500/50 bg-amber-500/10 text-amber-200 px-3 py-2 text-sm space-y-2" role="status" hidden>
-          <p id="coverageText"></p>
-          <button type="button" id="coverageRetryBtn" class="px-3 py-2 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 transition text-sm">Try again</button>
         </div>
         <div id="dryStretch" class="rounded-md border px-3 py-2 text-sm">
           <div class="text-xs uppercase tracking-wide opacity-70">Longest dry stretch</div>
@@ -173,6 +176,13 @@
       </div>
     </section>
   </main>
+
+  <!-- A route search that outlasts the overlay carries on behind this, leaving the
+       page usable. Hidden from screen readers: #status says the same thing. -->
+  <div id="searchPill" class="search-pill" aria-hidden="true" hidden>
+    <span class="search-pill-spinner"></span>
+    <span id="searchPillText"></span>
+  </div>
 
   <!-- Busy overlay for anything that waits on the network. Overpass gives no
        total up front (it splits boxes as it goes), so the bar is indeterminate

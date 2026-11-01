@@ -163,14 +163,14 @@ test('the client sends only a bbox and a kind, never query text', async () => {
   assert.deepEqual(sent[0].body.bbox, BBOX);
 });
 
-test('adaptive fetch splits the bbox on 429 and merges the quads', async () => {
+test('adaptive fetch splits the bbox on 413 and merges the quads', async () => {
   const requested = [];
   const fetchImpl = async (_url, options) => {
     const { bbox } = JSON.parse(options.body);
     const key = `${bbox.minlat},${bbox.minlon},${bbox.maxlat},${bbox.maxlon}`;
     requested.push(key);
-    // Only the full-size parent is rate limited.
-    return requested.length === 1 ? reply(429, 'slow down') : reply(200, key);
+    // Only the full-size parent is too big.
+    return requested.length === 1 ? reply(413, 'too big') : reply(200, key);
   };
 
   const points = await fetchOverpassPointsAdaptive(BBOX, null, {
@@ -204,7 +204,7 @@ test('a 400 from the span cap is treated as splittable', async () => {
 
 test('adaptive fetch stops splitting once the bbox reaches minSpan', async () => {
   let calls = 0;
-  const fetchImpl = async () => { calls++; return reply(429, 'nope'); };
+  const fetchImpl = async () => { calls++; return reply(413, 'nope'); };
 
   await assert.rejects(
     fetchOverpassPointsAdaptive(
@@ -212,9 +212,23 @@ test('adaptive fetch stops splitting once the bbox reaches minSpan', async () =>
       null,
       { fetchImpl, initialBackoffMs: 0, minSpan: 0.01, parseXml: () => [] }
     ),
-    /Overpass error: 429/
+    /Overpass error: 413/
   );
   assert.equal(calls, 1, 'a bbox already below minSpan must not be split');
+});
+
+test('a busy answer is never split, because a smaller box would not help', async () => {
+  // Regression: splitting on these against a full server took a short route past
+  // five minutes of requests, each waiting out its own timeout.
+  for (const status of [429, 502, 503, 504]) {
+    let calls = 0;
+    const fetchImpl = async () => { calls++; return reply(status, 'busy'); };
+    await assert.rejects(
+      fetchOverpassPointsAdaptive(BBOX, null, { fetchImpl, initialBackoffMs: 0, minSpan: 0.01, parseXml: () => [] }),
+      new RegExp(`Overpass error: ${status}`)
+    );
+    assert.equal(calls, 1, `status ${status}`);
+  }
 });
 
 test('adaptive fetch does not retry errors that splitting cannot fix', async () => {
@@ -231,7 +245,7 @@ test('adaptive fetch does not retry errors that splitting cannot fix', async () 
 test('adaptive fetch dedupes points repeated across quads', async () => {
   let first = true;
   const fetchImpl = async () => {
-    if (first) { first = false; return reply(504, 'timeout'); }
+    if (first) { first = false; return reply(413, 'too big'); }
     return reply(200, 'ok');
   };
   const points = await fetchOverpassPointsAdaptive(BBOX, null, {
@@ -296,7 +310,7 @@ test('quads are fetched concurrently but stay under the cap', async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    if (calls === 1) return reply(429, 'slow down');
+    if (calls === 1) return reply(413, 'too big');
     inFlight++;
     peak = Math.max(peak, inFlight);
     await new Promise(r => setTimeout(r, 10));
@@ -325,7 +339,7 @@ test('deep recursive splitting does not deadlock under a small cap', async () =>
     calls++;
     const { bbox } = JSON.parse(options.body);
     const span = Math.max(bbox.maxlat - bbox.minlat, bbox.maxlon - bbox.minlon);
-    return span > 0.05 ? reply(504, 'timeout') : reply(200, 'ok');
+    return span > 0.05 ? reply(413, 'too big') : reply(200, 'ok');
   };
 
   const points = await fetchOverpassPointsAdaptive(
