@@ -26,6 +26,7 @@
 
 import {
   fetchRoutePoints,
+  dedupePointsByTypeId,
   waterSubtypeLabel,
   rankCoffeePoints,
   rankRefillPoints,
@@ -310,6 +311,7 @@ layersControl = L.control.layers(baseLayers, { 'Water Points': waterLayer, 'Refi
 // Helpers
 function setStatus(msg) {
   statusEl.textContent = msg || '';
+  renderSearchPill();
   // While busy, the overlay hides the sidebar, so it carries the same message.
   if (busyCount > 0 && msg && loadingTextEl) loadingTextEl.textContent = msg;
 }
@@ -342,10 +344,13 @@ function renderCoverageWarning() {
   const kinds = Object.keys(coverageGaps);
   el.hidden = kinds.length === 0;
   if (!kinds.length) return;
+  const nothingBack = kinds.every((kind) => coverageGaps[kind].failedTiles === coverageGaps[kind].totalTiles);
   const parts = kinds.map((kind) => `${COVERAGE_LABELS[kind]} (${coverageGaps[kind].failedTiles} of ${coverageGaps[kind].totalTiles} map sections)`);
-  document.getElementById('coverageText').textContent =
-    `OpenStreetMap's server could not check part of this route for ${parts.join(', ')}. ` +
-    'Stops there are missing, so the real dry stretch may be shorter than shown.';
+  document.getElementById('coverageText').textContent = nothingBack
+    ? `OpenStreetMap's servers are too busy right now to check this route for ${kinds.map((kind) => COVERAGE_LABELS[kind]).join(', ')}. ` +
+      'That says nothing about whether there are stops on it. Try again in a minute.'
+    : `OpenStreetMap's server could not check part of this route for ${parts.join(', ')}. ` +
+      'Stops there are missing, so the real dry stretch may be shorter than shown.';
 }
 
 function clearCoverageGaps() {
@@ -353,21 +358,96 @@ function clearCoverageGaps() {
   renderCoverageWarning();
 }
 
+// Route searches running now, by kind. They run behind the page, so the rider can
+// start something else meanwhile, and a new route has to be able to stop them.
+const routeSearches = new Map();
+
+// The overlay is for a short wait. On a busy day a search can take minutes, and
+// the route is already on the map to look at while it runs.
+const OVERLAY_MAX_MS = 15000;
+
+function cancelRouteSearches() {
+  for (const controller of routeSearches.values()) controller.abort();
+  routeSearches.clear();
+  renderSearchPill();
+}
+
+/** Progress for a search the overlay has stepped away from. */
+function renderSearchPill() {
+  const pill = document.getElementById('searchPill');
+  if (!pill) return;
+  pill.hidden = routeSearches.size === 0 || busyCount > 0;
+  document.getElementById('searchPillText').textContent = statusEl.textContent;
+}
+
 /**
- * Search the grid squares around a route. Throws only when nothing at all came
- * back; a partial answer is returned, and the hole shown to the rider.
+ * Search the grid squares around a route, drawing results as each one arrives.
+ *
+ * What is already known stays while the search runs and when part of it fails:
+ * the sections that came back last time on "Try again", or a shared route's saved
+ * water points. A search that finishes in full replaces it.
+ *
+ * @param {'water'|'refill'|'coffee'} kind
+ * @param {object} route
+ * @param {string} message status line
+ * @param {Array<object>} known
+ * @param {(points: Array<object>) => void} draw called with partial results
+ * @returns {Promise<Array<object>|null>} the points to show, or null when there is
+ *   nothing to show: the search was cancelled, or nothing came back and nothing
+ *   was known, which the coverage warning explains
  */
-async function searchRoute(kind, route, message) {
-  const { points, failedTiles, totalTiles } = await fetchRoutePoints(
-    kind,
-    routeTiles(route, WIDEST_RADIUS_M),
-    overpassProgress(message),
-    { initialBackoffMs: 500, maxBackoffMs: 4000 }
-  );
-  if (failedTiles) coverageGaps[kind] = { failedTiles, totalTiles };
-  else delete coverageGaps[kind];
+async function searchRoute(kind, route, message, known, draw) {
+  routeSearches.get(kind)?.abort();
+  const controller = new AbortController();
+  routeSearches.set(kind, controller);
+  delete coverageGaps[kind];
   renderCoverageWarning();
-  return points;
+
+  let overlayUp = true;
+  const liftOverlay = () => {
+    if (!overlayUp) return;
+    overlayUp = false;
+    clearTimeout(overlayTimer);
+    showLoading(false);
+  };
+  const overlayTimer = setTimeout(liftOverlay, OVERLAY_MAX_MS);
+  // Before the first status, which must find the overlay up to land on it.
+  showLoading(true);
+  setStatus(message);
+  const withKnown = (points) => dedupePointsByTypeId([...points, ...known]);
+
+  try {
+    const { points, failedTiles, totalTiles, lastError } = await fetchRoutePoints(
+      kind,
+      routeTiles(route, WIDEST_RADIUS_M),
+      ({ points: soFar, doneTiles, failedTiles: failedSoFar, totalTiles: total }) => {
+        setStatus(total > 1 ? `${message} ${doneTiles} of ${total} map sections checked` : message);
+        if (doneTiles > failedSoFar && doneTiles < total) {
+          liftOverlay();
+          draw(withKnown(soFar));
+        }
+      },
+      { signal: controller.signal, initialBackoffMs: 500, maxBackoffMs: 4000 }
+    );
+    if (!failedTiles) return points;
+
+    console.warn(`[searchRoute] ${kind}: ${failedTiles} of ${totalTiles} sections failed`, lastError);
+    coverageGaps[kind] = { failedTiles, totalTiles };
+    renderCoverageWarning();
+    const best = withKnown(points);
+    if (failedTiles === totalTiles && !best.length) {
+      setStatus('');
+      return null;
+    }
+    return best;
+  } catch (err) {
+    if (controller.signal.aborted) return null;
+    throw err;
+  } finally {
+    if (routeSearches.get(kind) === controller) routeSearches.delete(kind);
+    liftOverlay();
+    renderSearchPill();
+  }
 }
 
 // Seconds after which the overlay explains the wait. Public Overpass
@@ -466,6 +546,7 @@ function showLoading(show) {
   }
   loadingEl.hidden = !busy;
   loadingEl.classList.toggle('show', busy);
+  renderSearchPill();
 }
 
 function fitMapToGeoJSON(geojson) {
@@ -609,11 +690,19 @@ function renderSummary(points) {
   summaryCountEl.textContent = unconfirmed ? `${confirmed.length} + ${unconfirmed} unconfirmed` : String(points.length);
 
   const dry = longestDryStretch(currentRouteKm, confirmed);
-  const severity = dryStretchSeverity(dry.gapKm);
+  // Mid-search the gap can only shrink, so it should not look like a verdict.
+  const checking = routeSearches.has('water');
+  const severity = checking
+    ? { tone: 'border-slate-700 bg-slate-800 text-slate-200', note: 'still checking' }
+    : dryStretchSeverity(dry.gapKm);
   dryStretchEl.className = `rounded-md border px-3 py-2 text-sm ${severity.tone}`;
-  dryStretchValueEl.textContent = confirmed.length
-    ? `${formatKm(dry.gapKm)} km — km ${formatKm(dry.startKm)} to ${formatKm(dry.endKm)} (${severity.note})`
-    : `${formatKm(dry.gapKm)} km — no ${unconfirmed ? 'confirmed ' : ''}water found on this route`;
+  if (confirmed.length) {
+    dryStretchValueEl.textContent = `${formatKm(dry.gapKm)} km — km ${formatKm(dry.startKm)} to ${formatKm(dry.endKm)} (${severity.note})`;
+  } else if (checking) {
+    dryStretchValueEl.textContent = 'Still checking the route for water';
+  } else {
+    dryStretchValueEl.textContent = `${formatKm(dry.gapKm)} km — no ${unconfirmed ? 'confirmed ' : ''}water found on this route`;
+  }
 
   // Show what the less certain stops do to the worst gap. Kept as separate
   // lines rather than folded into the headline number, because neither an
@@ -1150,6 +1239,7 @@ function resetApp() {
     routeLayer = null;
     routeWaypointLayer = null;
     if (routeWaypointsControl) routeWaypointsControl.hidden = true;
+    cancelRouteSearches();
     clearRouteResults();
     clearNearby();
     // Reset state
@@ -1323,6 +1413,8 @@ async function loadSharedRoute(token) {
   setError('');
   setStatus('Loading shared route …');
   showLoading(true);
+  let geojson;
+  let savedPoints;
   try {
     const resp = await fetch(`/api/shared-routes/${encodeURIComponent(parsed)}`);
     if (!resp.ok) {
@@ -1345,7 +1437,7 @@ async function loadSharedRoute(token) {
     // Parse GPX to GeoJSON
     const parser = new DOMParser();
     const xml = parser.parseFromString(data.gpxText, 'application/xml');
-    const geojson = toGeoJSON.gpx(xml);
+    geojson = toGeoJSON.gpx(xml);
     if (!geojson || !geojson.features || geojson.features.length === 0) {
       throw new Error('No features found in shared GPX.');
     }
@@ -1354,42 +1446,26 @@ async function loadSharedRoute(token) {
     renderRoute(geojson);
     currentRouteIndex = buildRouteIndex(geojson);
     currentRouteKm = currentRouteIndex.totalM / 1000;
-
-    setStatus(MSG_WATER);
-    let results = [];
-    try {
-      results = await searchRoute('water', geojson, MSG_WATER);
-    } catch (fetchErr) {
-      console.warn('[loadSharedRoute] Live OSM query failed, falling back to saved points', fetchErr);
-      if (Array.isArray(data.waterPoints) && data.waterPoints.length > 0) {
-        results = data.waterPoints;
-      } else {
-        throw fetchErr;
-      }
-    }
-
-    foundWaterPoints = results;
-    const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
-    renderWaterMarkers(near, true);
-    lastNearWaterPoints = near;
-    renderSummary(near);
-    renderProfile(near);
-    setStatus(`Loaded shared route: ${currentRouteFilename} (${near.length} near-route water points).`);
-    downloadBtn.disabled = false;
-    if (shareBtn) shareBtn.disabled = false;
+    savedPoints = Array.isArray(data.waterPoints) ? data.waterPoints : [];
   } catch (e) {
     console.error(e);
     setError(e.message || String(e));
     setStatus('Load a GPX or FIT file to begin.');
+    return;
   } finally {
     showLoading(false);
   }
+
+  // The saved points show straight away, and stand in if the live search fails.
+  const near = await findWaterOnRoute(geojson, savedPoints);
+  if (near) setStatus(`Loaded shared route: ${currentRouteFilename} (${near.length} near-route water points).`);
 }
 
 async function handleRouteFile(file) {
   setError('');
   setStatus(`Parsing ${file.name} …`);
   const geojson = await parseRouteFile(file);
+  cancelRouteSearches();
   clearRouteResults();
   renderRoute(geojson);
   currentRouteGeoJSON = geojson;
@@ -1404,19 +1480,36 @@ async function handleRouteFile(file) {
   await findWaterOnRoute(geojson);
 }
 
-/** The water search for the loaded route, and everything drawn from it. */
-async function findWaterOnRoute(geojson) {
-  showLoading(true);
+/** Put water results on the map and in the summary, as far as they have got. */
+function drawWater(geojson, points) {
+  const animate = foundWaterPoints.length === 0;
+  const changed = points.length !== foundWaterPoints.length;
+  foundWaterPoints = points;
+  // Ride order, not proximity order: this is the sequence you meet them in.
+  const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, points, selectedRadiusMeters, currentRouteIndex));
+  // Redrawing would close any popup the rider has opened meanwhile.
+  if (changed) renderWaterMarkers(near, animate);
+  lastNearWaterPoints = near;
+  renderSummary(near);
+  renderProfile(near);
+  return near;
+}
+
+/**
+ * The water search for the loaded route, and everything drawn from it.
+ *
+ * @param {object} geojson
+ * @param {Array<object>} [known] points to keep showing until there is better
+ * @returns {Promise<Array<object>|null>} near-route points, or null with nothing to show
+ */
+async function findWaterOnRoute(geojson, known = foundWaterPoints) {
   try {
-    setStatus(MSG_WATER);
-    const results = await searchRoute('water', geojson, MSG_WATER);
-    foundWaterPoints = results;
-    // Ride order, not proximity order: this is the sequence you meet them in.
-    const near = sortPointsAlongRoute(filterPointsNearRoute(geojson, results, selectedRadiusMeters, currentRouteIndex));
-    renderWaterMarkers(near, true);
-    lastNearWaterPoints = near;
-    renderSummary(near);
-    renderProfile(near);
+    // Started first, so that drawing the known points already reads as "checking".
+    const search = searchRoute('water', geojson, MSG_WATER, known, (points) => drawWater(geojson, points));
+    if (known.length) drawWater(geojson, known);
+    const results = await search;
+    if (!results) return null;
+    const near = drawWater(geojson, results);
     setStatus(`Found ${near.length} near-route water points (${results.length} total).`);
     downloadBtn.disabled = false;
     if (shareBtn) shareBtn.disabled = false;
@@ -1424,12 +1517,12 @@ async function findWaterOnRoute(geojson) {
     // Not while part of the search is missing: the stored points would be short,
     // and "Try again" comes back through here.
     if (!coverageGaps.water) saveRoute(near);
+    return near;
   } catch (e) {
     console.error(e);
     setError(e.message || String(e));
     setStatus('');
-  } finally {
-    showLoading(false);
+    return null;
   }
 }
 
@@ -1526,21 +1619,24 @@ if (navRefillBtn) {
     try {
       setError('');
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
+      if (routeSearches.has('refill')) return;
       const routeFC = currentRouteAsFeatureCollection();
-      setStatus(MSG_REFILL);
-      showLoading(true);
-      const results = await searchRoute('refill', routeFC, MSG_REFILL);
-      foundRefillPoints = results || [];
-      nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, foundRefillPoints, selectedRadiusMeters, currentRouteIndex));
-      renderRefillMarkers(nearRefillPoints, true);
-      renderSummary(lastNearWaterPoints);
+      const draw = (points) => {
+        const animate = foundRefillPoints.length === 0;
+        const changed = points.length !== foundRefillPoints.length;
+        foundRefillPoints = points;
+        nearRefillPoints = rankRefillPoints(filterPointsNearRoute(routeFC, points, selectedRadiusMeters, currentRouteIndex));
+        if (changed) renderRefillMarkers(nearRefillPoints, animate);
+        renderSummary(lastNearWaterPoints);
+      };
+      const results = await searchRoute('refill', routeFC, MSG_REFILL, foundRefillPoints, draw);
+      if (!results) return;
+      draw(results);
       setStatus(`Found ${nearRefillPoints.length} near-route refill stops (${foundRefillPoints.length} total).`);
     } catch (err) {
       console.error(err);
       setError(err.message || String(err));
       setStatus('');
-    } finally {
-      showLoading(false);
     }
   });
 }
@@ -1551,20 +1647,24 @@ if (navCoffeeBtn) {
     try {
       setError('');
       if (!routeLayer) { setError('Please load a GPX route first.'); return; }
+      if (routeSearches.has('coffee')) return;
       const routeFC = currentRouteAsFeatureCollection();
-      setStatus(MSG_COFFEE);
-      showLoading(true);
-      const results = await searchRoute('coffee', routeFC, MSG_COFFEE);
-      foundCoffeePoints = results || [];
-      const near = rankCoffeePoints(filterPointsNearRoute(routeFC, foundCoffeePoints, selectedRadiusMeters, currentRouteIndex));
-      renderCoffeeMarkers(near, true);
+      const draw = (points) => {
+        const animate = foundCoffeePoints.length === 0;
+        const changed = points.length !== foundCoffeePoints.length;
+        foundCoffeePoints = points;
+        const near = rankCoffeePoints(filterPointsNearRoute(routeFC, points, selectedRadiusMeters, currentRouteIndex));
+        if (changed) renderCoffeeMarkers(near, animate);
+        return near;
+      };
+      const results = await searchRoute('coffee', routeFC, MSG_COFFEE, foundCoffeePoints, draw);
+      if (!results) return;
+      const near = draw(results);
       setStatus(`Found ${near.length} near-route coffee places (${foundCoffeePoints.length} total).`);
     } catch (err) {
       console.error(err);
       setError(err.message || String(err));
       setStatus('');
-    } finally {
-      showLoading(false);
     }
   });
 }
@@ -1635,7 +1735,8 @@ function locateRider() {
 
 // The public Overpass server turns queries away when it is full. A near-me box
 // is too small to gain anything from splitting, so wait a moment and ask once more.
-const OVERPASS_BUSY = new Set([429, 502, 503, 504]);
+// A 413 is here because that same box has to do: it means Overpass gave up on it.
+const OVERPASS_BUSY = new Set([413, 429, 502, 503, 504]);
 const MSG_OVERPASS_BUSY = "OpenStreetMap's server is busy right now. Try again in a minute.";
 async function fetchNearbyOnce(bbox, onProgress) {
   const options = { minSpan: 1, initialBackoffMs: 0 };

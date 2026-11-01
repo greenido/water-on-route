@@ -33,6 +33,37 @@ html, body { height: 100%; }
   100% { transform: translateY(0) scale(1); opacity: 1; }
 }
 
+.search-pill {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 14px;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  /* Above the map's panes and controls, below the overlay and the toast. */
+  z-index: 1400;
+  pointer-events: none;
+}
+.search-pill[hidden] { display: none; }
+.search-pill-spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #1f2937;
+  border-top-color: #38bdf8;
+  animation: spin 1s linear infinite;
+}
+
 .loading {
   position: fixed;
   inset: 0;

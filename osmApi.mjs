@@ -4,6 +4,21 @@ import { haversineMeters, bearingDegrees, formatPassesKm } from './geo.mjs';
 
 export function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+/** Like sleep, but ends as soon as the signal aborts, so cancelling is not held up. */
+function sleepUnlessAborted(ms, signal) {
+  if (!signal) return sleep(ms);
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
+  });
+}
+
 /**
  * Cap how many operations run at once.
  *
@@ -39,11 +54,16 @@ export function createLimiter(max) {
 export async function fetchWithTimeout(url, options, timeoutMs, fetchImpl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const callerSignal = options?.signal;
+  const abort = () => controller.abort();
+  if (callerSignal?.aborted) abort();
+  callerSignal?.addEventListener('abort', abort);
   try {
     const resp = await (fetchImpl || fetch)(url, { ...options, signal: controller.signal });
     return resp;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', abort);
   }
 }
 
@@ -173,13 +193,14 @@ export const OVERPASS_CLIENT_TIMEOUT_MS = 65000;
  * @param {'water'|'coffee'} kind
  * @returns {Promise<string>} Overpass XML
  */
-export async function fetchOverpassXml(bbox, kind = 'water', timeoutMs = OVERPASS_CLIENT_TIMEOUT_MS, fetchImpl) {
+export async function fetchOverpassXml(bbox, kind = 'water', timeoutMs = OVERPASS_CLIENT_TIMEOUT_MS, fetchImpl, signal) {
   const resp = await fetchWithTimeout(
     getOverpassUrl(),
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bbox, kind })
+      body: JSON.stringify({ bbox, kind }),
+      signal
     },
     timeoutMs,
     fetchImpl
@@ -329,14 +350,27 @@ export function dedupePointsByTypeId(points) {
 }
 
 /**
- * Answers that a smaller box can fix. A 400 is the proxy refusing a box above
- * its span cap, and a 413 is a response over its size limit.
+ * Answers that a smaller box can fix: the box or its answer really is too big.
+ * A 400 is the proxy refusing a box above its span cap, and a 413 is a response
+ * over its size limit or a query Overpass could not finish.
  */
-const SPLITTABLE_STATUSES = new Set([400, 413, 429, 504]);
+const SPLITTABLE_STATUSES = new Set([400, 413]);
 
-/** "At capacity" from every upstream: a smaller box won't help, a moment might. */
-const RETRYABLE_STATUSES = new Set([502, 503]);
-const CAPACITY_RETRIES = 2;
+/**
+ * Answers that a smaller box cannot fix: the public server takes as long over a
+ * one-node query as a big one when it is full. Splitting on these turned one bad
+ * minute into dozens of requests, each waiting out its own timeout, against a
+ * server that was already refusing work.
+ */
+const BUSY_STATUSES = new Set([429, 502, 503, 504]);
+const BUSY_RETRIES = 2;
+
+/**
+ * Longest a route search may run, however busy the servers are. What did not come
+ * back by then is reported as missing. The proxy finishes and caches anything
+ * still in flight, so asking again picks up where this left off.
+ */
+export const ROUTE_SEARCH_BUDGET_MS = 3 * 60 * 1000;
 
 function getStatusFromError(err) {
   if (!err) return undefined;
@@ -367,17 +401,22 @@ export async function fetchOverpassPointsAdaptive(bbox, onProgress, options = {}
  * The shared fetch-and-split loop.
  *
  * Given an onBoxFailed callback, a box that cannot be fetched is reported and
- * yields nothing, so its neighbours still count, and a box refused for being at
- * capacity is asked again first, a few seconds apart: the public server answers
- * that within a second, so an immediate retry would just be refused too. Without
+ * yields nothing, so its neighbours still count, and a box refused because the
+ * server is busy is asked again first, a few seconds apart: the public server
+ * can refuse within a second, so an immediate retry would be refused too. Without
  * one the error propagates.
+ *
+ * Nothing new starts once options.signal is aborted or options.deadlineAt passes,
+ * and a request already running is cut off at the deadline.
  */
 function createBoxFetcher(onProgress, options) {
   const minSpan = options.minSpan ?? 0.02;
   const timeoutMs = options.timeoutMs ?? OVERPASS_CLIENT_TIMEOUT_MS;
   const initialBackoffMs = options.initialBackoffMs ?? 500;
   const maxBackoffMs = options.maxBackoffMs ?? 4000;
-  const capacityBackoffMs = options.capacityBackoffMs ?? 3000;
+  const busyBackoffMs = options.busyBackoffMs ?? 3000;
+  const deadlineAt = options.deadlineAt ?? Infinity;
+  const signal = options.signal;
   const fetchImpl = options.fetchImpl; // optional for tests
   const kind = options.kind ?? 'water';
   const parseXml = options.parseXml ?? parseOsmXmlForWater;
@@ -392,7 +431,11 @@ function createBoxFetcher(onProgress, options) {
       try {
         // Only the network call is limited, so a parent awaiting its quads is
         // never occupying a slot.
-        const xml = await limit(() => fetchOverpassXml(tile, kind, timeoutMs, fetchImpl));
+        const xml = await limit(() => {
+          const remainingMs = deadlineAt - Date.now();
+          if (signal?.aborted || remainingMs <= 0) throw new Error('The search stopped before reaching this section');
+          return fetchOverpassXml(tile, kind, Math.min(timeoutMs, remainingMs), fetchImpl, signal);
+        });
         box.fetched++;
         if (onProgress) onProgress(box.fetched, undefined);
         return parseXml(xml);
@@ -402,15 +445,15 @@ function createBoxFetcher(onProgress, options) {
         const canSplit = span.lat > minSpan || span.lon > minSpan;
         if (SPLITTABLE_STATUSES.has(status) && canSplit) {
           const backoff = backoffFor(attempt);
-          if (backoff > 0) await sleep(backoff);
+          if (backoff > 0) await sleepUnlessAborted(backoff, signal);
           const quads = splitBboxIntoQuads(tile);
           const results = await Promise.all(quads.map((q) => box.fetch(q, attempt + 1, onBoxFailed)));
           return results.flat();
         }
         if (!onBoxFailed) throw e;
-        if (RETRYABLE_STATUSES.has(status) && retries < CAPACITY_RETRIES) {
-          const backoff = capacityBackoffMs * Math.pow(3, retries);
-          if (backoff > 0) await sleep(backoff);
+        const backoff = busyBackoffMs * Math.pow(3, retries);
+        if (BUSY_STATUSES.has(status) && retries < BUSY_RETRIES && Date.now() + backoff < deadlineAt) {
+          if (backoff > 0) await sleepUnlessAborted(backoff, signal);
           return box.fetch(tile, attempt, onBoxFailed, retries + 1);
         }
         onBoxFailed(e);
@@ -429,36 +472,48 @@ function createBoxFetcher(onProgress, options) {
  * caller needs to know about the hole: water missing from a square looks exactly
  * like there being none.
  *
- * Squares are split at most twice. A route has many of them, so splitting each
- * all the way down would turn one bad minute into hundreds of requests.
+ * Squares are split at most twice, and only when too big. A route has many of
+ * them, so splitting each all the way down would mean hundreds of requests.
  *
  * @param {'water'|'coffee'|'refill'} kind
  * @param {Array<object>} tiles
- * @param {function|null} onProgress
+ * @param {function|null} onProgress called as each square finishes with
+ *   {points, doneTiles, failedTiles, totalTiles}, so results can be shown as they
+ *   arrive
  * @param {object} [options]
- * @returns {Promise<{points: Array<object>, failedTiles: number, totalTiles: number}>}
- * @throws the last error when no square could be fetched at all
+ * @param {AbortSignal} [options.signal] cancels the search
+ * @param {number} [options.budgetMs] see ROUTE_SEARCH_BUDGET_MS
+ * @returns {Promise<{points: Array<object>, failedTiles: number, totalTiles: number, lastError: Error|null}>}
+ *   failedTiles === totalTiles when nothing at all came back
+ * @throws an AbortError only when options.signal cancelled the search
  */
 export async function fetchRoutePoints(kind, tiles, onProgress, options = {}) {
   let lastError = null;
-  const fetchBox = createBoxFetcher(onProgress, {
+  const fetchBox = createBoxFetcher(null, {
     minSpan: 0.2,
     ...options,
+    deadlineAt: Date.now() + (options.budgetMs ?? ROUTE_SEARCH_BUDGET_MS),
     kind,
     parseXml: ROUTE_PARSERS[kind]
   });
+  const collected = [];
+  let doneTiles = 0;
   let failedTiles = 0;
-  const results = await Promise.all(tiles.map(async (tile) => {
+  await Promise.all(tiles.map(async (tile) => {
     let failed = false;
     const points = await fetchBox.fetch(tile, 0, (err) => {
       failed = true;
       lastError = err;
     });
+    collected.push(...points);
+    doneTiles++;
     if (failed) failedTiles++;
-    return points;
+    if (onProgress && !options.signal?.aborted) {
+      onProgress({ points: dedupePointsByTypeId(collected), doneTiles, failedTiles, totalTiles: tiles.length });
+    }
   }));
-  if (lastError && fetchBox.fetched === 0) throw lastError;
-  return { points: dedupePointsByTypeId(results.flat()), failedTiles, totalTiles: tiles.length };
+  if (options.signal?.aborted) throw Object.assign(new Error('Search cancelled'), { name: 'AbortError' });
+  return { points: dedupePointsByTypeId(collected), failedTiles, totalTiles: tiles.length, lastError };
 }
 
 const parseCoffeeXml = (xml) => parseOsmXmlGeneric(xml).filter((p) => isCoffeeTags(p.tags));

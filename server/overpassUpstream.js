@@ -15,8 +15,8 @@
  * A 200 is not always an answer. When a query runs out of time or memory after
  * Overpass has started replying, the status has already gone out, so it reports
  * the failure as a <remark> in the body, with little or no data around it.
- * Those count as busy too: passed along, they read as "no water here" and would
- * be cached as if that were true.
+ * Those move on to the next upstream too: passed along, they read as "no water
+ * here" and would be cached as if that were true.
  *
  * Requests carry an identifying User-Agent. The Overpass usage policy asks for
  * one, and overpass-api.de answers some generic agents (`node`, `curl/…`)
@@ -34,15 +34,23 @@ const DEFAULT_USER_AGENT = 'water-on-route/1.0 (+https://github.com/greenido/wat
 const RESPONSE_TOO_LARGE = 'RESPONSE_TOO_LARGE';
 
 /**
- * Why a 200 from Overpass is not a usable answer, or null when it is.
- * The remark comes after any data, right before the closing tag.
+ * Why a 200 from Overpass is not a usable answer, or null when it is, with the
+ * status to report it as. A query that ran out of time or memory may do better
+ * as a smaller box, so it is a 413, which the client splits. Anything else that
+ * is not OSM data is an error page from a struggling server, so it is a 504,
+ * which the client retries as it is. The remark comes after any data, right
+ * before the closing tag.
  *
  * @param {Buffer} body
- * @returns {string|null}
+ * @returns {{reason: string, status: number}|null}
  */
 function overpassBodyFailure(body) {
-  if (!body.subarray(0, 1024).toString('utf8').includes('<osm')) return 'sent something other than OSM data';
-  if (/<remark>\s*runtime error/i.test(body.subarray(-4096).toString('utf8'))) return 'reported a runtime error';
+  if (!body.subarray(0, 1024).toString('utf8').includes('<osm')) {
+    return { reason: 'sent something other than OSM data', status: 504 };
+  }
+  if (/<remark>\s*runtime error/i.test(body.subarray(-4096).toString('utf8'))) {
+    return { reason: 'reported a runtime error', status: 413 };
+  }
   return null;
 }
 
@@ -141,9 +149,8 @@ async function queryUpstreams({
       };
       const failure = result.ok ? overpassBodyFailure(result.body) : null;
       if (failure) {
-        // The proxy's clients treat a 504 as a reason to try a smaller box.
-        lastBusy = { ...result, status: 504, ok: false };
-        outcome = failure;
+        lastBusy = { ...result, status: failure.status, ok: false };
+        outcome = failure.reason;
       } else if (!BUSY_STATUSES.has(result.status)) {
         return result;
       } else {
